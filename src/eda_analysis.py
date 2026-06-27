@@ -155,3 +155,153 @@ class TextLengthAnalyzer:
             f" {fully_extractive} out of {len(self.df)} "
             f"({fully_extractive / len(self.df) * 100:.2f}%)"
         )
+
+    def analyze_positional_bias(self) -> None:
+        """Extracts and analyzes the paragraph indices where spoilers are
+
+        located to detect positional bias (e.g., Lead Bias).
+        """
+        print("\n=== Spoiler Positional Bias Analysis ===")
+
+        spoiler_paragraphs = []
+        for _, row in self.df.iterrows():
+            positions = row.get("spoilerPositions", [])
+            if isinstance(positions, list) and len(positions) > 0:
+                # Extract the paragraph index of the first segment of the spoiler
+                try:
+                    first_segment = positions[0]
+                    start_position = first_segment[0]
+                    para_index = start_position[0]
+                    spoiler_paragraphs.append(para_index)
+                except (IndexError, TypeError):
+                    continue
+
+        if not spoiler_paragraphs:
+            print("[WARNING] No valid spoiler positions found to analyze.")
+            return
+
+        pos_series = pd.Series(spoiler_paragraphs)
+        print("Paragraph Index Distribution for Spoilers:")
+        print(pos_series.describe(percentiles=[0.5, 0.75, 0.9, 0.95]))
+
+        # Generate Positional Plot
+        plt.figure(figsize=(8, 5))
+        sns.histplot(pos_series, bins=20, kde=False, color="purple")
+        plt.title("Distribution of Spoiler Locations (Paragraph Index)")
+        plt.xlabel("Paragraph Index")
+        plt.ylabel("Count")
+        plt.tight_layout()
+        plt.savefig("spoiler_positional_bias.png")
+        print("[SUCCESS] Positional bias plot saved to: ./spoiler_positional_bias.png")
+        plt.close()
+
+    def analyze_tag_specific_lengths(self) -> None:
+        """Analyzes the word count distribution of the spoilers themselves,
+
+        grouped by their specific tags (phrase, passage, multi).
+        """
+        print("\n=== Tag-Specific Spoiler Length Analysis ===")
+
+        self.df["spoiler_word_count"] = self.df["spoiler"].apply(self._count_words)
+        self.df["clean_tag"] = self.df["tags"].apply(
+            lambda x: x[0] if isinstance(x, list) else x
+        )
+
+        grouped_stats = self.df.groupby("clean_tag")["spoiler_word_count"].describe(
+            percentiles=[0.5, 0.75, 0.9, 0.95]
+        )
+        print(grouped_stats)
+
+        # Generate Boxplot for lengths
+        plt.figure(figsize=(8, 5))
+        sns.boxplot(
+            x="clean_tag",
+            y="spoiler_word_count",
+            data=self.df,
+            palette="Set2",
+            hue="clean_tag",
+            legend=False,
+        )
+        plt.title("Spoiler Word Count Distribution per Class")
+        plt.xlabel("Spoiler Type (Tag)")
+        plt.ylabel("Word Count")
+        plt.yscale("log")  # Using log scale in case of extreme passage lengths
+        plt.tight_layout()
+        plt.savefig("spoiler_length_by_tag.png")
+        print(
+            "[SUCCESS] Tag-specific length plot saved to: ./spoiler_length_by_tag.png"
+        )
+        plt.close()
+
+    def analyze_oracle_retrieval_bound(self) -> None:
+        """Evaluates an informational retrieval upper-bound using Jaccard
+
+        Similarity between the clickbait post and paragraphs, computing Recall@K
+        for the ground-truth spoiler paragraph.
+        """
+        print("\n=== Oracle Retrieval Upper-Bound Analysis (IR Metrics) ===")
+
+        recall_at_1 = 0
+        recall_at_3 = 0
+        recall_at_5 = 0
+        total_valid_cases = 0
+
+        for _, row in self.df.iterrows():
+            post_words = set(
+                (
+                    " ".join(row["postText"])
+                    if isinstance(row["postText"], list)
+                    else str(row["postText"])
+                )
+                .lower()
+                .split()
+            )
+            paragraphs = row["targetParagraphs"]
+            spoilers = (
+                " ".join(row["spoiler"])
+                if isinstance(row["spoiler"], list)
+                else str(row["spoiler"])
+            )
+
+            if not paragraphs or not spoilers:
+                continue
+
+            total_valid_cases += 1
+
+            # Find which paragraph actually contains the spoiler (Ground Truth)
+            gt_indices = [
+                i for i, p in enumerate(paragraphs) if spoilers.lower() in p.lower()
+            ]
+            if not gt_indices:
+                continue
+            gt_index = gt_indices[0]  # Take the first occurrence
+
+            # Rank paragraphs based on Jaccard Similarity with the postText (clickbait query)
+            scored_paragraphs = []
+            for idx, para in enumerate(paragraphs):
+                para_words = set(para.lower().split())
+                intersection = post_words.intersection(para_words)
+                union = post_words.union(para_words)
+                jaccard_score = len(intersection) / len(union) if union else 0.0
+                scored_paragraphs.append((idx, jaccard_score))
+
+            # Sort by score descending
+            scored_paragraphs.sort(key=lambda x: x[1], reverse=True)
+            ranked_indices = [item[0] for item in scored_paragraphs]
+
+            # Calculate Recall@K
+            if gt_index in ranked_indices[:1]:
+                recall_at_1 += 1
+            if gt_index in ranked_indices[:3]:
+                recall_at_3 += 1
+            if gt_index in ranked_indices[:5]:
+                recall_at_5 += 1
+
+        if total_valid_cases == 0:
+            print("[WARNING] No valid cases for Oracle Analysis.")
+            return
+
+        print(f"Total Evaluated Cases: {total_valid_cases}")
+        print(f"Oracle Recall@1: {recall_at_1 / total_valid_cases * 100:.2f}%")
+        print(f"Oracle Recall@3: {recall_at_3 / total_valid_cases * 100:.2f}%")
+        print(f"Oracle Recall@5: {recall_at_5 / total_valid_cases * 100:.2f}%")

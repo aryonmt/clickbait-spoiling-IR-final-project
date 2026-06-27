@@ -27,10 +27,11 @@ def main():
     analyzer.process_lengths()
     analyzer.display_statistics()
     analyzer.plot_distributions()
-
-    # New Analysis Steps
     analyzer.analyze_class_balance()
     analyzer.analyze_spoiler_overlap()
+    analyzer.analyze_positional_bias()
+    analyzer.analyze_tag_specific_lengths()
+    analyzer.analyze_oracle_retrieval_bound()
 
 
 if __name__ == "__main__":
