@@ -91,3 +91,67 @@ class TextLengthAnalyzer:
         plt.savefig(plot_path)
         print(f"\n[SUCCESS] Distribution plots saved to: {plot_path}")
         plt.close()
+
+    def analyze_class_balance(self) -> pd.Series:
+        """Analyzes and prints the distribution of spoiler types (tags).
+
+        Returns:
+            pd.Series: Percentage distribution of each class.
+        """
+        print("\n=== Class Distribution Analysis (Task 1) ===")
+        # Since 'tags' might contain lists, we extract the first element if necessary
+        # Usually it's a list containing one string like ['phrase']
+        class_series = self.df["tags"].apply(
+            lambda x: x[0] if isinstance(x, list) else x
+        )
+
+        counts = class_series.value_counts()
+        percentages = class_series.value_counts(normalize=True) * 100
+
+        distribution_df = pd.DataFrame({"Count": counts, "Percentage (%)": percentages})
+        print(distribution_df)
+        return class_series
+
+    def analyze_spoiler_overlap(self) -> None:
+        """Calculates the lexical overlap (Jaccard Similarity) between the
+
+        human spoiler and the article content to verify if it is fully
+        extractive.
+        """
+        print("\n=== Spoiler Lexical Overlap Analysis ===")
+
+        overlaps = []
+        for _, row in self.df.iterrows():
+            paragraphs = (
+                " ".join(row["targetParagraphs"])
+                if isinstance(row["targetParagraphs"], list)
+                else str(row["targetParagraphs"])
+            )
+            spoilers = (
+                " ".join(row["spoiler"])
+                if isinstance(row["spoiler"], list)
+                else str(row["spoiler"])
+            )
+
+            words_article = set(paragraphs.lower().split())
+            words_spoiler = set(spoilers.lower().split())
+
+            if not words_spoiler:
+                overlaps.append(0.0)
+                continue
+
+            # Jaccard Overlap: Intersection / Spoiler Size
+            # To see how much of the spoiler words exist in the article
+            intersection = words_spoiler.intersection(words_article)
+            overlap_ratio = len(intersection) / len(words_spoiler)
+            overlaps.append(overlap_ratio)
+
+        self.df["spoiler_overlap_ratio"] = overlaps
+        print(self.df["spoiler_overlap_ratio"].describe())
+
+        fully_extractive = (self.df["spoiler_overlap_ratio"] == 1.0).sum()
+        print(
+            f"\nFully Extractive Spoilers (100% word overlap):"
+            f" {fully_extractive} out of {len(self.df)} "
+            f"({fully_extractive / len(self.df) * 100:.2f}%)"
+        )

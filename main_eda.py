@@ -28,6 +28,10 @@ def main():
     analyzer.display_statistics()
     analyzer.plot_distributions()
 
+    # New Analysis Steps
+    analyzer.analyze_class_balance()
+    analyzer.analyze_spoiler_overlap()
+
 
 if __name__ == "__main__":
     main()
