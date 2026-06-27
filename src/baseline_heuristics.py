@@ -1,12 +1,14 @@
 from typing import List
 
 import nltk
-import pandas as pd
 
+# Ensure both punkt and punkt_tab are safely downloaded for newer NLTK versions
 try:
     nltk.data.find("tokenizers/punkt")
+    nltk.data.find("tokenizers/punkt_tab")
 except LookupError:
     nltk.download("punkt", quiet=True)
+    nltk.download("punkt_tab", quiet=True)
 
 
 class HeuristicSpoilerGenerator:
@@ -53,7 +55,7 @@ class HeuristicSpoilerGenerator:
 
         return [first_para]
 
-    def generate(self, df: pd.DataFrame, predicted_tags: List[str]) -> List[List[str]]:
+    def generate(self, df: List[str], predicted_tags: List[str]) -> List[List[str]]:
         """Orchestrates heuristic generation across the entire dataset.
 
         Args:
