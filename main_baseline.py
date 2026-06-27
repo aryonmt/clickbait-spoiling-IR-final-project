@@ -6,15 +6,14 @@ from src.baseline_classifier import BaselineSpoilerClassifier
 from src.baseline_heuristics import HeuristicSpoilerGenerator
 from src.data_loader import JSONLLoader
 from src.evaluation import AdvancedEvaluationSuite
+from src.utils import extract_primary_tag
 
 
 def main():
-    # File paths setup
     train_path = os.path.join("data", "train.jsonl")
     val_path = os.path.join("data", "validation.jsonl")
     output_path = "run.jsonl"
 
-    # Step 2.1: Data Loading
     try:
         train_loader = JSONLLoader(train_path)
         train_df = train_loader.load_data()
@@ -26,25 +25,19 @@ def main():
         print("Ensure both train.jsonl and validation.jsonl are in the 'data/' folder.")
         return
 
-    # Step 2.3: Task 1 Baseline Classifier
     classifier = BaselineSpoilerClassifier()
     classifier.fit(train_df)
     predicted_tags = classifier.predict(val_df)
 
-    # Step 2.4: Task 2 Heuristic Generator
     generator = HeuristicSpoilerGenerator()
     predicted_spoilers = generator.generate(val_df, predicted_tags)
 
-    # Step 2.5: Run Automated Evaluation Suite
-    y_true_tags = (
-        val_df["tags"].apply(lambda x: x[0] if isinstance(x, list) else x).tolist()
-    )
+    y_true_tags = val_df["tags"].apply(extract_primary_tag).tolist()
     ground_truth_spoilers = val_df["spoiler"].tolist()
 
     AdvancedEvaluationSuite.evaluate_task1(y_true_tags, predicted_tags)
     AdvancedEvaluationSuite.evaluate_task2(ground_truth_spoilers, predicted_spoilers)
 
-    # Step 2.6: Formulating output artifact in SemEval compliant structure
     print(f"\nSaving final baseline execution file to {output_path}...")
     output_records = []
     for idx, row in val_df.iterrows():

@@ -2,11 +2,13 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
+from src.utils import extract_primary_tag
+
 
 class TextLengthAnalyzer:
-    """Analyzer to calculate sequence lengths and statistical percentiles
+    """Analyzer to calculate sequence lengths and statistical percentiles for
 
-    for text features in the dataset.
+    text features in the dataset.
     """
 
     def __init__(self, df: pd.DataFrame):
@@ -72,14 +74,12 @@ class TextLengthAnalyzer:
         """
         plt.figure(figsize=(12, 5))
 
-        # Plot for Clickbait Post Lengths
         plt.subplot(1, 2, 1)
         sns.histplot(self.df["post_word_count"], kde=True, color="skyblue")
         plt.title("Distribution of Clickbait Post Word Counts")
         plt.xlabel("Word Count")
         plt.ylabel("Frequency")
 
-        # Plot for Article Content Lengths
         plt.subplot(1, 2, 2)
         sns.histplot(self.df["article_word_count"], kde=True, color="salmon")
         plt.title("Distribution of Article Word Counts")
@@ -99,11 +99,7 @@ class TextLengthAnalyzer:
             pd.Series: Percentage distribution of each class.
         """
         print("\n=== Class Distribution Analysis (Task 1) ===")
-        # Since 'tags' might contain lists, we extract the first element if necessary
-        # Usually it's a list containing one string like ['phrase']
-        class_series = self.df["tags"].apply(
-            lambda x: x[0] if isinstance(x, list) else x
-        )
+        class_series = self.df["tags"].apply(extract_primary_tag)
 
         counts = class_series.value_counts()
         percentages = class_series.value_counts(normalize=True) * 100
@@ -140,8 +136,6 @@ class TextLengthAnalyzer:
                 overlaps.append(0.0)
                 continue
 
-            # Jaccard Overlap: Intersection / Spoiler Size
-            # To see how much of the spoiler words exist in the article
             intersection = words_spoiler.intersection(words_article)
             overlap_ratio = len(intersection) / len(words_spoiler)
             overlaps.append(overlap_ratio)
@@ -167,7 +161,6 @@ class TextLengthAnalyzer:
         for _, row in self.df.iterrows():
             positions = row.get("spoilerPositions", [])
             if isinstance(positions, list) and len(positions) > 0:
-                # Extract the paragraph index of the first segment of the spoiler
                 try:
                     first_segment = positions[0]
                     start_position = first_segment[0]
@@ -184,7 +177,6 @@ class TextLengthAnalyzer:
         print("Paragraph Index Distribution for Spoilers:")
         print(pos_series.describe(percentiles=[0.5, 0.75, 0.9, 0.95]))
 
-        # Generate Positional Plot
         plt.figure(figsize=(8, 5))
         sns.histplot(pos_series, bins=20, kde=False, color="purple")
         plt.title("Distribution of Spoiler Locations (Paragraph Index)")
@@ -203,16 +195,13 @@ class TextLengthAnalyzer:
         print("\n=== Tag-Specific Spoiler Length Analysis ===")
 
         self.df["spoiler_word_count"] = self.df["spoiler"].apply(self._count_words)
-        self.df["clean_tag"] = self.df["tags"].apply(
-            lambda x: x[0] if isinstance(x, list) else x
-        )
+        self.df["clean_tag"] = self.df["tags"].apply(extract_primary_tag)
 
         grouped_stats = self.df.groupby("clean_tag")["spoiler_word_count"].describe(
             percentiles=[0.5, 0.75, 0.9, 0.95]
         )
         print(grouped_stats)
 
-        # Generate Boxplot for lengths
         plt.figure(figsize=(8, 5))
         sns.boxplot(
             x="clean_tag",
@@ -225,7 +214,7 @@ class TextLengthAnalyzer:
         plt.title("Spoiler Word Count Distribution per Class")
         plt.xlabel("Spoiler Type (Tag)")
         plt.ylabel("Word Count")
-        plt.yscale("log")  # Using log scale in case of extreme passage lengths
+        plt.yscale("log")
         plt.tight_layout()
         plt.savefig("spoiler_length_by_tag.png")
         print(
@@ -268,15 +257,13 @@ class TextLengthAnalyzer:
 
             total_valid_cases += 1
 
-            # Find which paragraph actually contains the spoiler (Ground Truth)
             gt_indices = [
                 i for i, p in enumerate(paragraphs) if spoilers.lower() in p.lower()
             ]
             if not gt_indices:
                 continue
-            gt_index = gt_indices[0]  # Take the first occurrence
+            gt_index = gt_indices[0]
 
-            # Rank paragraphs based on Jaccard Similarity with the postText (clickbait query)
             scored_paragraphs = []
             for idx, para in enumerate(paragraphs):
                 para_words = set(para.lower().split())
@@ -285,11 +272,9 @@ class TextLengthAnalyzer:
                 jaccard_score = len(intersection) / len(union) if union else 0.0
                 scored_paragraphs.append((idx, jaccard_score))
 
-            # Sort by score descending
             scored_paragraphs.sort(key=lambda x: x[1], reverse=True)
             ranked_indices = [item[0] for item in scored_paragraphs]
 
-            # Calculate Recall@K
             if gt_index in ranked_indices[:1]:
                 recall_at_1 += 1
             if gt_index in ranked_indices[:3]:

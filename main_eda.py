@@ -5,11 +5,9 @@ from src.eda_analysis import TextLengthAnalyzer
 
 
 def main():
-    # Define file paths
-    # Assuming data is downloaded inside a folder named 'data' in the root directory
+    # Fixed naming alignment to point to the real file name
     train_path = os.path.join("data", "train.jsonl")
 
-    # Step 1.1: Data Ingestion & Sanity Checks
     try:
         loader = JSONLLoader(file_path=train_path)
         train_df = loader.load_data()
@@ -17,12 +15,10 @@ def main():
     except FileNotFoundError as e:
         print(f"[ERROR] {e}")
         print(
-            "Please ensure you have placed 'training.jsonl' inside the 'data/'"
-            " directory."
+            "Please ensure you have placed 'train.jsonl' inside the 'data/' directory."
         )
         return
 
-    # Step 1.2: Sequence Length Distribution Analysis
     analyzer = TextLengthAnalyzer(df=train_df)
     analyzer.process_lengths()
     analyzer.display_statistics()

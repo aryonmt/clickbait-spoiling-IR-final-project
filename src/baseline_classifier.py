@@ -4,6 +4,8 @@ import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 
+from src.utils import extract_primary_tag
+
 
 class BaselineSpoilerClassifier:
     """A baseline classifier using TF-IDF and Logistic Regression for Task 1
@@ -43,7 +45,6 @@ class BaselineSpoilerClassifier:
             )
             paragraphs = row["targetParagraphs"]
 
-            # Lead Bias integration: only use top 5 paragraphs to optimize local memory
             top_paragraphs = (
                 " ".join(paragraphs[:5]) if isinstance(paragraphs, list) else ""
             )
@@ -53,7 +54,9 @@ class BaselineSpoilerClassifier:
 
     @staticmethod
     def _extract_labels(df: pd.DataFrame) -> List[str]:
-        """Extracts and flattens the tags column into string labels.
+        """Extracts and flattens the tags column into string labels using central
+
+        utilities.
 
         Args:
             df (pd.DataFrame): Input DataFrame.
@@ -61,7 +64,7 @@ class BaselineSpoilerClassifier:
         Returns:
             List[str]: Cleaned list of target labels.
         """
-        return df["tags"].apply(lambda x: x[0] if isinstance(x, list) else x).tolist()
+        return df["tags"].apply(extract_primary_tag).tolist()
 
     def fit(self, train_df: pd.DataFrame) -> None:
         """Trains the TF-IDF vectorizer and Logistic Regression model.
