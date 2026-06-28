@@ -121,6 +121,7 @@ class TransformerSpoilerClassifier:
             num_labels=3,
             id2label=self.id_to_label,
             label2id=self.label_to_id,
+            ignore_mismatched_sizes=True,  # Added to robustly handle layer size mismatch during fine-tuning
         )
 
         def compute_metrics(eval_pred):
