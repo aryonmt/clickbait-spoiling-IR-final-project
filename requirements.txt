@@ -1,8 +1,14 @@
 matplotlib==3.11.0
 numpy==2.5.0
-pandas==2.0.3
 seaborn==0.13.2
 tqdm==4.68.3
 nltk==3.9.4
 scikit-learn==1.9.0
 rouge-score==0.1.2
+torch>=2.0.0
+transformers>=4.38.0
+datasets>=2.16.0
+accelerate>=0.27.0
+evaluate>=0.4.1
+pytest>=7.0.0
+pandas>=2.0.0
