@@ -1,7 +1,27 @@
-# .gitignore
-venv/
-.idea/
-.vscode/
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Environments
+venv/
+.venv/
+env/
+
+# Pytest and coverage cache
+.pytest_cache/
+.coverage
+
+# Project specific artifacts
+logs/
+outputs/
+results_task1/
+results_qa/
 data/
+
+# Exclude generated submission files and images
+project_codebase.txt
+run.jsonl
+run_*.jsonl
+final_complete_submission.jsonl
+*.png
