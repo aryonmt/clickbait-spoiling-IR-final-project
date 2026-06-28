@@ -17,8 +17,21 @@ from src.utils import extract_primary_tag
 
 
 class EndToEndClickbaitPipeline:
+    """An end-to-end neural pipeline that combines spoiler type classification
+
+    and extractive question-answering for clickbait spoiling.
+    """
+
     def __init__(self, task1_dir: str, task2_dir: str, max_length: int = 512):
+        """Initializes tokenizers, models, and trainers for both tasks.
+
+        Args:
+            task1_dir (str): Directory path containing Task 1 classifier weights.
+            task2_dir (str): Directory path containing Task 2 QA extractor weights.
+            max_length (int): Maximum sequence length for tokenization inputs.
+        """
         print("[INFO] Initializing End-to-End Deep Transformer Pipeline...")
+
         # Load Task 1 (Classifier)
         self.t1_tokenizer = AutoTokenizer.from_pretrained(task1_dir)
         self.t1_model = AutoModelForSequenceClassification.from_pretrained(task1_dir)
@@ -34,6 +47,14 @@ class EndToEndClickbaitPipeline:
         self.max_length = max_length
 
     def predict_pipeline(self, df: pd.DataFrame):
+        """Executes sequential prediction across both transformer architectures.
+
+        Args:
+            df (pd.DataFrame): Input dataframe containing clickbait samples.
+
+        Returns:
+            tuple: A tuple containing predicted tags (list) and predicted spoilers (list).
+        """
         # --- STEP 1: Task 1 Classification ---
         processed_t1 = pd.DataFrame()
         processed_t1["post"] = df["postText"].apply(
@@ -50,7 +71,6 @@ class EndToEndClickbaitPipeline:
                 x["post"], x["article"], truncation=True, max_length=self.max_length
             ),
             batched=True,
-            verbose=False,
         )
 
         print("Executing Task 1: Predicting Spoiler Types...")
@@ -116,6 +136,7 @@ class EndToEndClickbaitPipeline:
 
 
 def main():
+    """Main orchestrator for complete end-to-end dual-transformer evaluation."""
     parser = argparse.ArgumentParser(
         description="Run complete dual-transformer neural pipeline evaluation"
     )
