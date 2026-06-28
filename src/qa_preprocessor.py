@@ -35,7 +35,7 @@ def find_answer_span(context: str, answer: str) -> Optional[Tuple[int, int]]:
 
     # Try 3: Character-by-character mapping of collapsed spaces and standardized quotes
     def normalize_char(c: str) -> str:
-        if c in '“”"':
+        if c in '“”“"':
             return '"'
         if c in "‘’'":
             return "'"
@@ -169,8 +169,10 @@ class QAPreprocessor:
 
                 self.fallback_count += 1
                 self.tag_fallbacks[tag] = self.tag_fallbacks.get(tag, 0) + 1
-                self.logger.warning(
-                    f"Spoiler text not found in context for uuid: {uuids[sample_index]}. "
+
+                # Downgraded from warning to info to keep logs clean during sliding window splits
+                self.logger.info(
+                    f"Spoiler text not found in context window for uuid: {uuids[sample_index]}. "
                     f"Falling back to CLS index. Tag: {tag}"
                 )
             else:
@@ -204,7 +206,9 @@ class QAPreprocessor:
 
                     self.fallback_count += 1
                     self.tag_fallbacks[tag] = self.tag_fallbacks.get(tag, 0) + 1
-                    self.logger.warning(
+
+                    # Downgraded from warning to info to keep logs clean during sliding window splits
+                    self.logger.info(
                         f"Answer span outside active token window for uuid: {uuids[sample_index]}. "
                         f"Falling back to CLS index. Tag: {tag}"
                     )
