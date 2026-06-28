@@ -1,0 +1,386 @@
+import json
+import os
+from datetime import datetime
+
+import matplotlib.pyplot as plt
+import pandas as pd
+import seaborn as sns
+from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
+from rouge_score import rouge_scorer
+from sklearn.metrics import classification_report, confusion_matrix
+
+from src.logging_setup import setup_logger
+from src.utils import extract_primary_tag
+
+logger = setup_logger("visualization_suite")
+
+
+class EvaluationReportBuilder:
+    """Computes robust evaluation metrics and generates visual charts and HTML reports."""
+
+    def __init__(
+        self, predictions_path: str, val_path: str, output_dir: str = "reports"
+    ):
+        self.predictions_path = predictions_path
+        self.val_path = val_path
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.report_dir = os.path.join(output_dir, timestamp)
+        os.makedirs(self.report_dir, exist_ok=True)
+
+    def _load_and_align_data(self) -> pd.DataFrame:
+        """Loads both validation data and model predictions and aligns them on uuid."""
+        logger.info(
+            f"Loading files:\n - Ground truth: {self.val_path}\n - Predictions: {self.predictions_path}"
+        )
+
+        val_df = pd.read_json(self.val_path, lines=True)
+        pred_df = pd.read_json(self.predictions_path, lines=True)
+
+        # Merge safely on uuid to align indices perfectly
+        merged_df = pd.merge(val_df, pred_df, on="uuid", suffixes=("_true", "_pred"))
+        logger.info(f"Successfully aligned {len(merged_df)} validation samples.")
+        return merged_df
+
+    def _compute_generation_metrics(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Computes BLEU and ROUGE-L scores per instance."""
+        scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
+        smoother = SmoothingFunction().method1
+
+        bleus = []
+        rouges = []
+
+        for _, row in df.iterrows():
+            gt = row["spoiler_true"]
+            pred = row["spoiler_pred"]
+
+            gt_text = " ".join(gt).lower() if isinstance(gt, list) else str(gt).lower()
+            pred_text = (
+                " ".join(pred).lower() if isinstance(pred, list) else str(pred).lower()
+            )
+
+            # Compute ROUGE-L
+            rouge_score = scorer.score(gt_text, pred_text)["rougeL"].fmeasure
+            rouges.append(rouge_score)
+
+            # Compute BLEU-4
+            gt_tokens = gt_text.split()
+            pred_tokens = pred_text.split()
+            if not pred_tokens or not gt_tokens:
+                bleus.append(0.0)
+            else:
+                score = sentence_bleu(
+                    [gt_tokens], pred_tokens, smoothing_function=smoother
+                )
+                bleus.append(score)
+
+        df["bleu"] = bleus
+        df["rouge_l"] = rouges
+        df["true_tag"] = df["tags"].apply(extract_primary_tag)
+        df["pred_tag"] = df["spoilerType"]
+
+        return df
+
+    def _plot_confusion_matrix(self, y_true: list, y_pred: list):
+        """Generates and saves the classification confusion matrix."""
+        plt.figure(figsize=(6, 5))
+        labels = ["phrase", "passage", "multi"]
+        cm = confusion_matrix(y_true, y_pred, labels=labels)
+
+        sns.heatmap(
+            cm,
+            annot=True,
+            fmt="d",
+            cmap="Blues",
+            xticklabels=labels,
+            yticklabels=labels,
+        )
+        plt.title("Task 1: Confusion Matrix Heatmap")
+        plt.ylabel("Ground Truth Label")
+        plt.xlabel("Predicted Label")
+        plt.tight_layout()
+
+        plt.savefig(os.path.join(self.report_dir, "confusion_matrix.png"), dpi=150)
+        plt.close()
+
+    def _plot_classification_metrics(self, report_dict: dict):
+        """Generates and saves bar plots of precision, recall, and f1 scores."""
+        classes = ["phrase", "passage", "multi"]
+        metrics_data = []
+
+        for cls in classes:
+            if cls in report_dict:
+                metrics_data.append(
+                    {
+                        "Class": cls,
+                        "Precision": report_dict[cls]["precision"],
+                        "Recall": report_dict[cls]["recall"],
+                        "F1-Score": report_dict[cls]["f1-score"],
+                    }
+                )
+
+        df_plot = pd.DataFrame(metrics_data).melt(
+            id_vars="Class", var_name="Metric", value_name="Score"
+        )
+
+        plt.figure(figsize=(8, 5))
+        sns.barplot(data=df_plot, x="Class", y="Score", hue="Metric", palette="Set2")
+        plt.title("Task 1: Classification Metrics Breakdown")
+        plt.ylim(0, 1.05)
+        plt.tight_layout()
+
+        plt.savefig(
+            os.path.join(self.report_dir, "classification_metrics.png"), dpi=150
+        )
+        plt.close()
+
+    def _plot_task2_by_type(self, df: pd.DataFrame):
+        """Generates and saves boxplots of text generation metrics per spoiler type."""
+        plt.figure(figsize=(12, 5))
+
+        plt.subplot(1, 2, 1)
+        sns.boxplot(
+            data=df,
+            x="true_tag",
+            y="bleu",
+            hue="true_tag",
+            legend=False,
+            palette="Set3",
+        )
+        plt.title("BLEU Score Distribution by Spoiler Type")
+        plt.xlabel("Spoiler Type")
+        plt.ylabel("BLEU Score")
+        plt.ylim(-0.05, 1.05)
+
+        plt.subplot(1, 2, 2)
+        sns.boxplot(
+            data=df,
+            x="true_tag",
+            y="rouge_l",
+            hue="true_tag",
+            legend=False,
+            palette="Set3",
+        )
+        plt.title("ROUGE-L Score Distribution by Spoiler Type")
+        plt.xlabel("Spoiler Type")
+        plt.ylabel("ROUGE-L Score")
+        plt.ylim(-0.05, 1.05)
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.report_dir, "task2_scores_by_type.png"), dpi=150)
+        plt.close()
+
+    def _plot_length_comparison(self, df: pd.DataFrame):
+        """Generates and saves predicted length vs actual length scatterplot."""
+        df["gt_len"] = df["spoiler_true"].apply(
+            lambda x: len(" ".join(x).split()) if isinstance(x, list) else 0
+        )
+        df["pred_len"] = df["spoiler_pred"].apply(
+            lambda x: len(" ".join(x).split()) if isinstance(x, list) else 0
+        )
+
+        plt.figure(figsize=(7, 5))
+        sns.scatterplot(
+            data=df,
+            x="gt_len",
+            y="pred_len",
+            hue="true_tag",
+            alpha=0.7,
+            palette="Dark2",
+        )
+
+        max_val = max(df["gt_len"].max(), df["pred_len"].max(), 10)
+        plt.plot([0, max_val], [0, max_val], "k--", alpha=0.5)
+
+        plt.title("Spoiler Length Comparison")
+        plt.xlabel("Ground Truth Word Count")
+        plt.ylabel("Predicted Word Count")
+        plt.xlim(-2, max_val + 5)
+        plt.ylim(-2, max_val + 5)
+        plt.tight_layout()
+
+        plt.savefig(os.path.join(self.report_dir, "length_comparison.png"), dpi=150)
+        plt.close()
+
+    def _generate_html_report(self, summary: dict, worst_cases: list):
+        """Creates an integrated HTML page showcasing metrics and plots."""
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Clickbait Spoiling System Evaluation</title>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 40px; background-color: #f8f9fa; color: #333; }}
+        h1, h2 {{ color: #2c3e50; border-bottom: 2px solid #ecf0f1; padding-bottom: 10px; }}
+        .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }}
+        .card {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }}
+        .metric-value {{ font-size: 24px; font-weight: bold; color: #2980b9; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 15px; }}
+        th, td {{ padding: 12px; border: 1px solid #ddd; text-align: left; }}
+        th {{ background-color: #34495e; color: white; }}
+        tr:nth-child(even) {{ background-color: #f9f9f9; }}
+        img {{ max-width: 100%; height: auto; border-radius: 4px; display: block; margin: 0 auto; }}
+    </style>
+</head>
+<body>
+    <h1>Clickbait Spoiling Evaluation Report</h1>
+    <p>Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+
+    <div class="card">
+        <h2>System Performance Metrics</h2>
+        <div class="grid" style="grid-template-columns: repeat(4, 1fr);">
+            <div class="card" style="text-align: center;">
+                <p>Task 1 Macro F1</p>
+                <p class="metric-value">{summary["task1_macro_f1"]:.4f}</p>
+            </div>
+            <div class="card" style="text-align: center;">
+                <p>Task 1 Accuracy</p>
+                <p class="metric-value">{summary["task1_accuracy"]:.4f}</p>
+            </div>
+            <div class="card" style="text-align: center;">
+                <p>Task 2 Mean BLEU</p>
+                <p class="metric-value">{summary["task2_mean_bleu"]:.4f}</p>
+            </div>
+            <div class="card" style="text-align: center;">
+                <p>Task 2 Mean ROUGE-L</p>
+                <p class="metric-value">{summary["task2_mean_rouge_l"]:.4f}</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h2>Task 1: Confusion Matrix</h2>
+            <img src="confusion_matrix.png" alt="Confusion Matrix">
+        </div>
+        <div class="card">
+            <h2>Task 1: Metrics per Class</h2>
+            <img src="classification_metrics.png" alt="Classification Metrics">
+        </div>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h2>Task 2: Performance by Type</h2>
+            <img src="task2_scores_by_type.png" alt="Task 2 Metrics by Type">
+        </div>
+        <div class="card">
+            <h2>Task 2: Length Correlation</h2>
+            <img src="length_comparison.png" alt="Length Comparison">
+        </div>
+    </div>
+
+    <div class="card" style="margin-top: 20px;">
+        <h2>Worst Performing Prediction Samples (sorted by BLEU)</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>UUID</th>
+                    <th>Type</th>
+                    <th>Ground Truth Spoiler</th>
+                    <th>Predicted Spoiler</th>
+                    <th>BLEU Score</th>
+                </tr>
+            </thead>
+            <tbody>
+        """
+
+        for case in worst_cases:
+            html_content += f"""
+                <tr>
+                    <td>{case["uuid"]}</td>
+                    <td><span style="font-weight:bold;">{case["true_tag"]}</span></td>
+                    <td style="color: #27ae60;">{case["gt"]}</td>
+                    <td style="color: #c0392b;">{case["pred"]}</td>
+                    <td>{case["bleu"]:.4f}</td>
+                </tr>
+            """
+
+        html_content += """
+            </tbody>
+        </table>
+    </div>
+</body>
+</html>
+        """
+
+        with open(
+            os.path.join(self.report_dir, "report.html"), "w", encoding="utf-8"
+        ) as f:
+            f.write(html_content)
+
+    def build_report(self):
+        """Orchestrates metric computations, plotting, and report emission."""
+        df = self._load_and_align_data()
+        df = self._compute_generation_metrics(df)
+
+        # 1. Task 1 Metrics
+        y_true = df["true_tag"].tolist()
+        y_pred = df["pred_tag"].tolist()
+
+        report_dict = classification_report(y_true, y_pred, output_dict=True)
+        acc = report_dict["accuracy"]
+        macro_f1 = report_dict["macro avg"]["f1-score"]
+
+        self._plot_confusion_matrix(y_true, y_pred)
+        self._plot_classification_metrics(report_dict)
+
+        # 2. Task 2 Metrics
+        mean_bleu = df["bleu"].mean()
+        mean_rouge = df["rouge_l"].mean()
+
+        self._plot_task2_by_type(df)
+        self._plot_length_comparison(df)
+
+        # Group stats for JSON export
+        summary_metrics = {
+            "task1_accuracy": acc,
+            "task1_macro_f1": macro_f1,
+            "task2_mean_bleu": mean_bleu,
+            "task2_mean_rouge_l": mean_rouge,
+            "task1_by_type": {
+                tag: {
+                    "precision": report_dict[tag]["precision"],
+                    "recall": report_dict[tag]["recall"],
+                    "f1": report_dict[tag]["f1-score"],
+                }
+                for tag in ["phrase", "passage", "multi"]
+                if tag in report_dict
+            },
+            "task2_by_type": {
+                tag: {
+                    "mean_bleu": float(df[df["true_tag"] == tag]["bleu"].mean()),
+                    "mean_rouge": float(df[df["true_tag"] == tag]["rouge_l"].mean()),
+                }
+                for tag in ["phrase", "passage", "multi"]
+            },
+        }
+
+        # Save structured machine-readable JSON
+        with open(
+            os.path.join(self.report_dir, "metrics_summary.json"), "w", encoding="utf-8"
+        ) as f:
+            json.dump(summary_metrics, f, indent=4)
+
+        # Get 5 worst performing predictions for error analysis
+        worst_df = df.sort_values(by="bleu").head(5)
+        worst_cases = []
+        for _, row in worst_df.iterrows():
+            worst_cases.append(
+                {
+                    "uuid": row["uuid"],
+                    "true_tag": row["true_tag"],
+                    "gt": " | ".join(row["spoiler_true"])
+                    if isinstance(row["spoiler_true"], list)
+                    else str(row["spoiler_true"]),
+                    "pred": " | ".join(row["spoiler_pred"])
+                    if isinstance(row["spoiler_pred"], list)
+                    else str(row["spoiler_pred"]),
+                    "bleu": float(row["bleu"]),
+                }
+            )
+
+        # 3. Generate visual HTML report
+        self._generate_html_report(summary_metrics, worst_cases)
+        logger.info(
+            f"Visual metrics report compiled successfully at: {self.report_dir}"
+        )
