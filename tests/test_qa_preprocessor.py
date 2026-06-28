@@ -1,6 +1,6 @@
 from datasets import Dataset
 
-from src.qa_preprocessor import QAPreprocessor
+from src.qa_preprocessor import QAPreprocessor, find_answer_span
 
 
 def test_prepare_train_features():
@@ -29,3 +29,15 @@ def test_prepare_train_features():
     assert "start_positions" in tokenized.column_names
     assert "end_positions" in tokenized.column_names
     assert len(tokenized["start_positions"]) == 1
+
+
+def test_find_answer_span_exact():
+    """Tests if exact matching works correctly."""
+    assert find_answer_span("this is a test context", "test") == (10, 14)
+
+
+def test_find_answer_span_normalized():
+    """Tests quotation and white-space normalization robustness."""
+    assert find_answer_span("she said “hello  world”", '"hello world"') == (9, 23)
+    assert find_answer_span("the price was $5.00", " $5.00 ") == (14, 19)
+    assert find_answer_span("empty spaces", "") is None
