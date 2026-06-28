@@ -18,7 +18,7 @@ class TransformerInferencePipeline:
         self.tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
         self.model = AutoModelForSequenceClassification.from_pretrained(checkpoint_dir)
         self.id_to_label = {0: "phrase", 1: "passage", 2: "multi"}
-        self.trainer = Trainer(model=self.model, tokenizer=self.tokenizer)
+        self.trainer = Trainer(model=self.model, processing_class=self.tokenizer)
 
     def predict(self, df: pd.DataFrame) -> List[str]:
         """Generates scalar string predictions for the given challenge dataframe."""
@@ -43,7 +43,7 @@ class TransformerInferencePipeline:
                 max_length=self.max_length,
             )
 
-        tokenized_dataset = dataset.map(tokenize_func, batched=True, verbose=False)
+        tokenized_dataset = dataset.map(tokenize_func, batched=True)
 
         print("Running batch transformer inference...")
         predictions = self.trainer.predict(tokenized_dataset)
