@@ -31,8 +31,10 @@ class PipelineConfig:
     task2_weight_decay: float = 0.01
 
     # Multi-generator parameters (Phase 4)
-    task2_multi_method: str = "tfidf"  # Can be 'jaccard' or 'tfidf'
-    task2_multi_top_k: int = 3  # Optimal k-value extracted from comparisons
+    task2_multi_method: str = (
+        "jaccard"  # Set strictly to 'jaccard' based on A/B/C test results
+    )
+    task2_multi_top_k: int = 3  # Set to 3 as it yielded the highest ROUGE-L overlap
 
     def __post_init__(self) -> None:
         """Create necessary output and logging directories."""
