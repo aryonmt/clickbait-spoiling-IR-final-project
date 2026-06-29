@@ -134,7 +134,7 @@ def main():
         weight_decay=0.01,
         logging_steps=10,
         load_best_model_at_end=True,
-        metric_for_best_model="f1",  # Changed to token-F1
+        metric_for_best_model="token_f1",
         greater_is_better=True,  # Higher token-F1 is better
         fp16=True,
         report_to="none",
