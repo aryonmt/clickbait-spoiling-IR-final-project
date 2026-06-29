@@ -24,4 +24,10 @@ project_codebase.txt
 run.jsonl
 run_*.jsonl
 final_complete_submission.jsonl
+
+# Ignore global PNGs but explicitly allow them inside the reports folder
 *.png
+!reports/
+!reports/**/*.png
+!reports/**/*.html
+!reports/**/*.json
