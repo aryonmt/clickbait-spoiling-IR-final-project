@@ -11,10 +11,10 @@ from transformers import (
     Trainer,
 )
 
-from src.baseline_heuristics import HeuristicSpoilerGenerator
 from src.data_loader import JSONLLoader
 from src.evaluation import AdvancedEvaluationSuite
 from src.logging_setup import setup_logger
+from src.retrieval_generator import RetrievalSpoilerGenerator
 from src.utils import extract_primary_tag
 
 # Set up integrated log tracking
@@ -179,10 +179,15 @@ class ClickbaitIntegratedPipeline:
             pred_tag = predicted_tags[idx]
 
             if pred_tag == "multi":
-                # Route 'multi' classes to custom Heuristic Spoiler Generator
+                # Route 'multi' classes to custom lexically ranked Retrieval Spoiler Generator
+                post_text = (
+                    " ".join(row["postText"])
+                    if isinstance(row["postText"], list)
+                    else str(row["postText"])
+                )
                 paragraphs = row["targetParagraphs"]
-                spoiler = HeuristicSpoilerGenerator._extract_heuristic(
-                    paragraphs, "multi"
+                spoiler = RetrievalSpoilerGenerator.generate_multi_spoiler(
+                    post_text=post_text, paragraphs=paragraphs, top_k=3
                 )
             else:
                 # Route 'phrase' and 'passage' classes to Transformer QA Extractor
