@@ -19,7 +19,7 @@ def main():
         )
         return
 
-    analyzer = TextLengthAnalyzer(df=train_df)
+    analyzer = TextLengthAnalyzer(df=train_df, output_dir="reports")
     analyzer.process_lengths()
     analyzer.display_statistics()
     analyzer.plot_distributions()

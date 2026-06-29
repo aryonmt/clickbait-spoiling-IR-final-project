@@ -1,3 +1,5 @@
+import os
+
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
@@ -11,13 +13,16 @@ class TextLengthAnalyzer:
     text features in the dataset.
     """
 
-    def __init__(self, df: pd.DataFrame):
-        """Initializes the analyzer with a dataset.
+    def __init__(self, df: pd.DataFrame, output_dir: str = "reports"):
+        """Initializes the analyzer with a dataset and an output directory.
 
         Args:
             df (pd.DataFrame): The target dataset.
+            output_dir (str): Directory where generated EDA plots will be saved.
         """
         self.df = df.copy()
+        self.output_dir = output_dir
+        os.makedirs(self.output_dir, exist_ok=True)
 
     @staticmethod
     def _count_words(text_input) -> int:
@@ -66,12 +71,8 @@ class TextLengthAnalyzer:
         )
         print(stats)
 
-    def plot_distributions(self, output_dir: str = ".") -> None:
-        """Generates and saves distribution plots for sequence lengths.
-
-        Args:
-            output_dir (str): Directory where the plot image will be saved.
-        """
+    def plot_distributions(self) -> None:
+        """Generates and saves distribution plots for sequence lengths."""
         plt.figure(figsize=(12, 5))
 
         plt.subplot(1, 2, 1)
@@ -87,7 +88,7 @@ class TextLengthAnalyzer:
         plt.ylabel("Frequency")
 
         plt.tight_layout()
-        plot_path = f"{output_dir}/sequence_length_distributions.png"
+        plot_path = os.path.join(self.output_dir, "sequence_length_distributions.png")
         plt.savefig(plot_path)
         print(f"\n[SUCCESS] Distribution plots saved to: {plot_path}")
         plt.close()
@@ -183,8 +184,10 @@ class TextLengthAnalyzer:
         plt.xlabel("Paragraph Index")
         plt.ylabel("Count")
         plt.tight_layout()
-        plt.savefig("spoiler_positional_bias.png")
-        print("[SUCCESS] Positional bias plot saved to: ./spoiler_positional_bias.png")
+
+        plot_path = os.path.join(self.output_dir, "spoiler_positional_bias.png")
+        plt.savefig(plot_path)
+        print(f"[SUCCESS] Positional bias plot saved to: {plot_path}")
         plt.close()
 
     def analyze_tag_specific_lengths(self) -> None:
@@ -216,10 +219,10 @@ class TextLengthAnalyzer:
         plt.ylabel("Word Count")
         plt.yscale("log")
         plt.tight_layout()
-        plt.savefig("spoiler_length_by_tag.png")
-        print(
-            "[SUCCESS] Tag-specific length plot saved to: ./spoiler_length_by_tag.png"
-        )
+
+        plot_path = os.path.join(self.output_dir, "spoiler_length_by_tag.png")
+        plt.savefig(plot_path)
+        print(f"[SUCCESS] Tag-specific length plot saved to: {plot_path}")
         plt.close()
 
     def analyze_oracle_retrieval_bound(self) -> None:
@@ -230,6 +233,7 @@ class TextLengthAnalyzer:
         """
         print("\n=== Oracle Retrieval Upper-Bound Analysis (IR Metrics) ===")
 
+        # Oracle metrics logging
         recall_at_1 = 0
         recall_at_3 = 0
         recall_at_5 = 0
