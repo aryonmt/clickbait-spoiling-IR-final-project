@@ -166,4 +166,9 @@ class TransformerSpoilerClassifier:
         print("\n=== RUNNING CONVERGENCE EVALUATION ===")
         eval_metrics = trainer.evaluate()
         print(eval_metrics)
+
+        # Phase 1.2: Explicitly save model to root output directory at completion
+        print(f"Saving optimized Task 1 classifier weights to {output_dir}...")
+        trainer.save_model(output_dir)
+
         return eval_metrics

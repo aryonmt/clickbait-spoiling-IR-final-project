@@ -1,251 +1,530 @@
-from typing import Optional, Tuple
+import json
+import os
+from datetime import datetime
 
-from transformers import AutoTokenizer
+import matplotlib.pyplot as plt
+import pandas as pd
+import seaborn as sns
+from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
+from rouge_score import rouge_scorer
+from sklearn.metrics import classification_report, confusion_matrix
 
 from src.logging_setup import setup_logger
-from src.utils import extract_primary_tag
+from src.utils import SPOILER_LABELS, extract_primary_tag
+
+logger = setup_logger("visualization_suite")
 
 
-def find_answer_span(context: str, answer: str) -> Optional[Tuple[int, int]]:
-    """Locates the start and end character indices of the answer inside context
-    using strict normalization (whitespace and quotation alignment) while
-    preserving raw character offsets.
+class EvaluationReportBuilder:
+    """Computes robust evaluation metrics and generates visual charts and HTML reports."""
 
-    Args:
-        context (str): The raw context string from target paragraphs.
-        answer (str): The raw answer text to find.
+    def __init__(
+        self, predictions_path: str, val_path: str, output_dir: str = "reports"
+    ):
+        self.predictions_path = predictions_path
+        self.val_path = val_path
 
-    Returns:
-        Optional[Tuple[int, int]]: (start_char, end_char) if matched, else None.
-    """
-    if not answer or not context:
-        return None
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.report_dir = os.path.join(output_dir, timestamp)
+        os.makedirs(self.report_dir, exist_ok=True)
 
-    # Try 1: Fast exact match
-    start_char = context.find(answer)
-    if start_char != -1:
-        return start_char, start_char + len(answer)
-
-    # Try 2: Normalized strip matching
-    clean_answer = answer.strip()
-    if clean_answer:
-        start_char = context.find(clean_answer)
-        if start_char != -1:
-            return start_char, start_char + len(clean_answer)
-
-    # Try 3: Character-by-character mapping of collapsed spaces and standardized quotes
-    def normalize_char(c: str) -> str:
-        if c in '“”“"':
-            return '"'
-        if c in "‘’'":
-            return "'"
-        if c.isspace():
-            return " "
-        return c.lower()
-
-    # Build index mapping from normalized representation to original raw string
-    norm_context = []
-    orig_indices = []
-    prev_was_space = False
-
-    for idx, char in enumerate(context):
-        norm_c = normalize_char(char)
-        if norm_c == " ":
-            if not prev_was_space:
-                norm_context.append(" ")
-                orig_indices.append(idx)
-                prev_was_space = True
-        else:
-            norm_context.append(norm_c)
-            orig_indices.append(idx)
-            prev_was_space = False
-
-    norm_context_str = "".join(norm_context)
-
-    # Build normalized answer search term
-    norm_answer = []
-    prev_was_space = False
-    for char in clean_answer:
-        norm_c = normalize_char(char)
-        if norm_c == " ":
-            if not prev_was_space:
-                norm_answer.append(" ")
-                prev_was_space = True
-        else:
-            norm_answer.append(norm_c)
-            prev_was_space = False
-
-    norm_answer_str = "".join(norm_answer)
-
-    norm_start = norm_context_str.find(norm_answer_str)
-    if norm_start != -1:
-        norm_end = norm_start + len(norm_answer_str) - 1
-        # Map indices back to the exact positions inside raw context
-        orig_start = orig_indices[norm_start]
-        orig_end = orig_indices[norm_end] + 1
-        return orig_start, orig_end
-
-    return None
-
-
-class QAPreprocessor:
-    """Preprocesses Clickbait Spoiling datasets into standardized extractive
-    Question-Answering token spans with active fallback monitoring.
-    """
-
-    def __init__(self, model_name: str, max_length: int = 512, doc_stride: int = 128):
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.max_length = max_length
-        self.doc_stride = doc_stride
-        self.logger = setup_logger("qa_preprocessor")
-
-        # Diagnostics metrics for span extraction analysis
-        self.total_processed = 0
-        self.fallback_count = 0
-        self.tag_fallbacks = {"phrase": 0, "passage": 0, "multi": 0}
-        self.tag_totals = {"phrase": 0, "passage": 0, "multi": 0}
-
-    def prepare_train_features(self, examples):
-        # Flatten posts and target paragraphs into single strings
-        questions = [
-            " ".join(q) if isinstance(q, list) else str(q) for q in examples["postText"]
-        ]
-
-        contexts = []
-        for paras in examples["targetParagraphs"]:
-            contexts.append(" ".join(paras) if isinstance(paras, list) else str(paras))
-
-        # Tokenize with truncation and padding, keeping overflows via sliding window
-        tokenized_examples = self.tokenizer(
-            questions,
-            contexts,
-            truncation="only_second",
-            max_length=self.max_length,
-            stride=self.doc_stride,
-            return_overflowing_tokens=True,
-            return_offsets_mapping=True,
-            padding="max_length",
+    def _load_and_align_data(self) -> pd.DataFrame:
+        """Loads both validation data and model predictions and aligns them on uuid."""
+        logger.info(
+            f"Loading files:\n - Ground truth: {self.val_path}\n - Predictions: {self.predictions_path}"
         )
 
-        sample_mapping = tokenized_examples.pop("overflow_to_sample_mapping")
-        offset_mapping = tokenized_examples["offset_mapping"]
+        val_df = pd.read_json(self.val_path, lines=True)
+        pred_df = pd.read_json(self.predictions_path, lines=True)
 
-        tokenized_examples["start_positions"] = []
-        tokenized_examples["end_positions"] = []
+        merged_df = pd.merge(val_df, pred_df, on="uuid", suffixes=("_true", "_pred"))
+        logger.info(f"Successfully aligned {len(merged_df)} validation samples.")
+        return merged_df
 
-        # Safe extraction of diagnostic fields to handle missing test-time columns
-        uuids = examples.get("uuid", ["unknown"] * len(questions))
-        raw_tags = examples.get("tags", [["phrase"]] * len(questions))
+    def _compute_generation_metrics(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Computes BLEU and ROUGE-L scores per instance."""
+        scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
+        smoother = SmoothingFunction().method1
 
-        for i, offsets in enumerate(offset_mapping):
-            input_ids = tokenized_examples["input_ids"][i]
-            cls_index = input_ids.index(self.tokenizer.cls_token_id)
+        bleus = []
+        rouges = []
 
-            # Get the original sample index
-            sample_index = sample_mapping[i]
-            context = contexts[sample_index]
+        for _, row in df.iterrows():
+            gt = row["spoiler_true"]
+            pred = row["spoiler_pred"]
 
-            # Reconstruct target span using multi-segment search strategy
-            spoilers = (
-                examples["spoiler"][sample_index] if "spoiler" in examples else []
+            gt_text = " ".join(gt).lower() if isinstance(gt, list) else str(gt).lower()
+            pred_text = (
+                " ".join(pred).lower() if isinstance(pred, list) else str(pred).lower()
             )
 
-            # Extract labels for type-specific monitoring
-            tag = extract_primary_tag(raw_tags[sample_index])
-            self.tag_totals[tag] = self.tag_totals.get(tag, 0) + 1
-            self.total_processed += 1
+            # Compute ROUGE-L
+            rouge_score = scorer.score(gt_text, pred_text)["rougeL"].fmeasure
+            rouges.append(rouge_score)
 
-            # Try finding a valid span from any of the spoiler segments
-            span = None
-            for answer_text in spoilers:
-                span = find_answer_span(context, answer_text)
-                if span is not None:
-                    break
-
-            if span is None:
-                # Anchor to CLS token (unanswerable fallback)
-                tokenized_examples["start_positions"].append(cls_index)
-                tokenized_examples["end_positions"].append(cls_index)
-
-                self.fallback_count += 1
-                self.tag_fallbacks[tag] = self.tag_fallbacks.get(tag, 0) + 1
-
-                # Downgraded from warning to info to keep logs clean during sliding window splits
-                self.logger.info(
-                    f"Spoiler text not found in context window for uuid: {uuids[sample_index]}. "
-                    f"Falling back to CLS index. Tag: {tag}"
-                )
+            # Compute BLEU-4
+            gt_tokens = gt_text.split()
+            pred_tokens = pred_text.split()
+            if not pred_tokens or not gt_tokens:
+                bleus.append(0.0)
             else:
-                start_char, end_char = span
+                score = sentence_bleu(
+                    [gt_tokens], pred_tokens, smoothing_function=smoother
+                )
+                bleus.append(score)
 
-                # Fetch sequence IDs to identify context tokens safely
-                sequence_ids = [
-                    1 if val is not None and val > 0 else 0
-                    for val in tokenized_examples.sequence_ids(i)
-                ]
+        df["bleu"] = bleus
+        df["rouge_l"] = rouges
+        df["true_tag"] = df["tags"].apply(extract_primary_tag)
+        df["pred_tag"] = df["spoilerType"]
 
-                # Find token span limits
-                token_start_index = 0
-                while (
-                    token_start_index < len(offsets)
-                    and sequence_ids[token_start_index] != 1
+        return df
+
+    def _plot_confusion_matrix(self, y_true: list, y_pred: list):
+        """Generates and saves the classification confusion matrix."""
+        plt.figure(figsize=(6, 5))
+        cm = confusion_matrix(y_true, y_pred, labels=SPOILER_LABELS)
+
+        sns.heatmap(
+            cm,
+            annot=True,
+            fmt="d",
+            cmap="Blues",
+            xticklabels=SPOILER_LABELS,
+            yticklabels=SPOILER_LABELS,
+        )
+        plt.title("Task 1: Confusion Matrix Heatmap")
+        plt.ylabel("Ground Truth Label")
+        plt.xlabel("Predicted Label")
+        plt.tight_layout()
+
+        plt.savefig(os.path.join(self.report_dir, "confusion_matrix.png"), dpi=150)
+        plt.close()
+
+    def _plot_classification_metrics(self, report_dict: dict):
+        """Generates and saves bar plots of precision, recall, and f1 scores."""
+        metrics_data = []
+
+        for cls in SPOILER_LABELS:
+            if cls in report_dict:
+                metrics_data.append(
+                    {
+                        "Class": cls,
+                        "Precision": report_dict[cls]["precision"],
+                        "Recall": report_dict[cls]["recall"],
+                        "F1-Score": report_dict[cls]["f1-score"],
+                    }
+                )
+
+        df_plot = pd.DataFrame(metrics_data).melt(
+            id_vars="Class", var_name="Metric", value_name="Score"
+        )
+
+        plt.figure(figsize=(8, 5))
+        sns.barplot(data=df_plot, x="Class", y="Score", hue="Metric", palette="Set2")
+        plt.title("Task 1: Classification Metrics Breakdown")
+        plt.ylim(0, 1.05)
+        plt.tight_layout()
+
+        plt.savefig(
+            os.path.join(self.report_dir, "classification_metrics.png"), dpi=150
+        )
+        plt.close()
+
+    def _plot_confidence_distribution(self, df: pd.DataFrame):
+        """Generates a histogram comparing confidence scores for correct vs incorrect predictions."""
+        if "confidence" not in df.columns:
+            logger.warning(
+                "Softmax confidence scores not found in predictions. Skipping histogram."
+            )
+            return
+
+        df["is_correct"] = df["true_tag"] == df["pred_tag"]
+
+        plt.figure(figsize=(7, 5))
+        sns.histplot(
+            data=df,
+            x="confidence",
+            hue="is_correct",
+            multiple="stack",
+            palette={True: "mediumseagreen", False: "salmon"},
+            bins=20,
+            alpha=0.8,
+        )
+        plt.title("Task 1: Prediction Confidence Distribution")
+        plt.xlabel("Probability Confidence")
+        plt.ylabel("Sample Count")
+        plt.tight_layout()
+
+        plt.savefig(
+            os.path.join(self.report_dir, "confidence_distribution.png"), dpi=150
+        )
+        plt.close()
+
+    def _plot_error_by_length(self, df: pd.DataFrame):
+        """Generates a bar plot showing error rates categorized by the article length (word counts)."""
+        df["article_len"] = df["targetParagraphs"].apply(
+            lambda x: len(" ".join(x).split()) if isinstance(x, list) else 0
+        )
+        df["is_correct"] = df["true_tag"] == df["pred_tag"]
+
+        # Categorize length into bins
+        def get_bin(length):
+            if length < 200:
+                return "Short (<200w)"
+            elif length < 600:
+                return "Medium (200w-600w)"
+            return "Long (>600w)"
+
+        df["length_bin"] = df["article_len"].apply(get_bin)
+
+        # Calculate error rates per bin
+        binned = (
+            df.groupby("length_bin")["is_correct"]
+            .value_counts(normalize=True)
+            .unstack()
+            .fillna(0)
+        )
+        if False in binned.columns:
+            binned["error_rate"] = binned[False]
+        else:
+            binned["error_rate"] = 0.0
+
+        # Standardize bin orders
+        bin_order = ["Short (<200w)", "Medium (200w-600w)", "Long (>600w)"]
+        binned = binned.reindex(bin_order).fillna(0)
+
+        plt.figure(figsize=(7, 5))
+        sns.barplot(
+            x=binned.index,
+            y=binned["error_rate"] * 100,
+            palette="Oranges_r",
+            hue=binned.index,
+            legend=False,
+        )
+        plt.title("Task 1: Error Rate by Article Word Count")
+        plt.xlabel("Article Length Group")
+        plt.ylabel("Error Rate (%)")
+        plt.ylim(0, 100)
+        plt.tight_layout()
+
+        plt.savefig(os.path.join(self.report_dir, "error_by_length.png"), dpi=150)
+        plt.close()
+
+    def _plot_task2_by_type(self, df: pd.DataFrame):
+        """Generates and saves boxplots of text generation metrics per spoiler type."""
+        plt.figure(figsize=(12, 5))
+
+        plt.subplot(1, 2, 1)
+        sns.boxplot(
+            data=df,
+            x="true_tag",
+            y="bleu",
+            hue="true_tag",
+            legend=False,
+            palette="Set3",
+        )
+        plt.title("BLEU Score Distribution by Spoiler Type")
+        plt.xlabel("Spoiler Type")
+        plt.ylabel("BLEU Score")
+        plt.ylim(-0.05, 1.05)
+
+        plt.subplot(1, 2, 2)
+        sns.boxplot(
+            data=df,
+            x="true_tag",
+            y="rouge_l",
+            hue="true_tag",
+            legend=False,
+            palette="Set3",
+        )
+        plt.title("ROUGE-L Score Distribution by Spoiler Type")
+        plt.xlabel("Spoiler Type")
+        plt.ylabel("ROUGE-L Score")
+        plt.ylim(-0.05, 1.05)
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.report_dir, "task2_scores_by_type.png"), dpi=150)
+        plt.close()
+
+    def _plot_length_comparison(self, df: pd.DataFrame):
+        """Generates and saves predicted length vs actual length scatterplot."""
+        df["gt_len"] = df["spoiler_true"].apply(
+            lambda x: len(" ".join(x).split()) if isinstance(x, list) else 0
+        )
+        df["pred_len"] = df["spoiler_pred"].apply(
+            lambda x: len(" ".join(x).split()) if isinstance(x, list) else 0
+        )
+
+        plt.figure(figsize=(7, 5))
+        sns.scatterplot(
+            data=df,
+            x="gt_len",
+            y="pred_len",
+            hue="true_tag",
+            alpha=0.7,
+            palette="Dark2",
+        )
+
+        max_val = max(df["gt_len"].max(), df["pred_len"].max(), 10)
+        plt.plot([0, max_val], [0, max_val], "k--", alpha=0.5)
+
+        plt.title("Spoiler Length Comparison")
+        plt.xlabel("Ground Truth Word Count")
+        plt.ylabel("Predicted Word Count")
+        plt.xlim(-2, max_val + 5)
+        plt.ylim(-2, max_val + 5)
+        plt.tight_layout()
+
+        plt.savefig(os.path.join(self.report_dir, "length_comparison.png"), dpi=150)
+        plt.close()
+
+    def _generate_html_report(self, summary: dict, worst_cases: list):
+        """Creates an integrated HTML page showcasing metrics and plots."""
+        # Include confidence and length bin charts in HTML grid
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Clickbait Spoiling System Evaluation — Version 2</title>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 40px; background-color: #f8f9fa; color: #333; }}
+        h1, h2 {{ color: #2c3e50; border-bottom: 2px solid #ecf0f1; padding-bottom: 10px; }}
+        .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }}
+        .card {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }}
+        .metric-value {{ font-size: 24px; font-weight: bold; color: #2980b9; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 15px; }}
+        th, td {{ padding: 12px; border: 1px solid #ddd; text-align: left; }}
+        th {{ background-color: #34495e; color: white; }}
+        tr:nth-child(even) {{ background-color: #f9f9f9; }}
+        img {{ max-width: 100%; height: auto; border-radius: 4px; display: block; margin: 0 auto; }}
+    </style>
+</head>
+<body>
+    <h1>Clickbait Spoiling Evaluation Report (V2 Pipeline)</h1>
+    <p>Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+
+    <div class="card">
+        <h2>System Performance Metrics</h2>
+        <div class="grid" style="grid-template-columns: repeat(5, 1fr);">
+            <div class="card" style="text-align: center;">
+                <p>Task 1 Macro F1</p>
+                <p class="metric-value">{summary["task1_macro_f1"]:.4f}</p>
+            </div>
+            <div class="card" style="text-align: center;">
+                <p>Task 1 Accuracy</p>
+                <p class="metric-value">{summary["task1_accuracy"]:.4f}</p>
+            </div>
+            <div class="card" style="text-align: center;">
+                <p>Task 2 Mean BLEU</p>
+                <p class="metric-value">{summary["task2_mean_bleu"]:.4f}</p>
+            </div>
+            <div class="card" style="text-align: center;">
+                <p>Task 2 Mean ROUGE-L</p>
+                <p class="metric-value">{summary["task2_mean_rouge_l"]:.4f}</p>
+            </div>
+            <div class="card" style="text-align: center;">
+                <p>Task 2 CLS Fallback Rate</p>
+                <p class="metric-value">{summary["task2_cls_fallback_label"]}</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h2>Task 1: Confusion Matrix</h2>
+            <img src="confusion_matrix.png" alt="Confusion Matrix">
+        </div>
+        <div class="card">
+            <h2>Task 1: Metrics per Class</h2>
+            <img src="classification_metrics.png" alt="Classification Metrics">
+        </div>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h2>Task 1: Confidence Distribution</h2>
+            <img src="confidence_distribution.png" alt="Confidence Distribution">
+        </div>
+        <div class="card">
+            <h2>Task 1: Error Rate by Length</h2>
+            <img src="error_by_length.png" alt="Error rate by Length">
+        </div>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h2>Task 2: Performance by Type</h2>
+            <img src="task2_scores_by_type.png" alt="Task 2 Metrics by Type">
+        </div>
+        <div class="card">
+            <h2>Task 2: Length Correlation</h2>
+            <img src="length_comparison.png" alt="Length Comparison">
+        </div>
+    </div>
+
+    <div class="card" style="margin-top: 20px;">
+        <h2>Worst Performing Prediction Samples (sorted by BLEU)</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>UUID</th>
+                    <th>Type</th>
+                    <th>Ground Truth Spoiler</th>
+                    <th>Predicted Spoiler</th>
+                    <th>BLEU Score</th>
+                </tr>
+            </thead>
+            <tbody>
+        """
+
+        for case in worst_cases:
+            html_content += f"""
+                <tr>
+                    <td>{case["uuid"]}</td>
+                    <td><span style="font-weight:bold;">{case["true_tag"]}</span></td>
+                    <td style="color: #27ae60;">{case["gt"]}</td>
+                    <td style="color: #c0392b;">{case["pred"]}</td>
+                    <td>{case["bleu"]:.4f}</td>
+                </tr>
+            """
+
+        html_content += """
+            </tbody>
+        </table>
+    </div>
+</body>
+</html>
+        """
+
+        with open(
+            os.path.join(self.report_dir, "report.html"), "w", encoding="utf-8"
+        ) as f:
+            f.write(html_content)
+
+    def build_report(self):
+        """Orchestrates metric computations, plotting, and report emission."""
+        df = self._load_and_align_data()
+        df = self._compute_generation_metrics(df)
+
+        # 1. Task 1 Metrics
+        y_true = df["true_tag"].tolist()
+        y_pred = df["pred_tag"].tolist()
+
+        report_dict = classification_report(y_true, y_pred, output_dict=True)
+        acc = report_dict["accuracy"]
+        macro_f1 = report_dict["macro avg"]["f1-score"]
+
+        self._plot_confusion_matrix(y_true, y_pred)
+        self._plot_classification_metrics(report_dict)
+        self._plot_confidence_distribution(df)
+        self._plot_error_by_length(df)
+
+        # 2. Task 2 Metrics
+        mean_bleu = df["bleu"].mean()
+        mean_rouge = df["rouge_l"].mean()
+
+        self._plot_task2_by_type(df)
+        self._plot_length_comparison(df)
+
+        # Phase 3.2: Safely parse fallback rate from real label quality statistics if available
+        fallback_rate = 0.0
+        fallback_label = ""
+
+        # Look for preprocessing statistics JSON inside predictions parallel folder
+        stats_path = os.path.join(
+            os.path.dirname(self.predictions_path), "label_quality_stats.json"
+        )
+        alt_stats_path = "results_qa/label_quality_stats.json"
+
+        stats_file = (
+            stats_path
+            if os.path.exists(stats_path)
+            else (alt_stats_path if os.path.exists(alt_stats_path) else None)
+        )
+
+        if stats_file:
+            try:
+                with open(stats_file, "r", encoding="utf-8") as f:
+                    stats_data = json.load(f)
+                fallback_rate = stats_data.get("fallback_rate", 0.0)
+                fallback_label = f"{fallback_rate * 100:.2f}%"
+                logger.info(f"Loaded exact CLS fallback rate from: {stats_file}")
+            except Exception as e:
+                logger.warning(
+                    f"Error parsing stats JSON file: {e}. Reverting to estimation."
+                )
+                stats_file = None
+
+        if not stats_file:
+            # Revert back to estimated proxies if the label stats are missing
+            fallback_cases = 0
+            for _, row in df.iterrows():
+                pred = row["spoiler_pred"]
+                paragraphs = row["targetParagraphs"]
+                first_para = (
+                    paragraphs[0]
+                    if isinstance(paragraphs, list) and len(paragraphs) > 0
+                    else ""
+                )
+                if not pred or (
+                    len(pred) == 1 and pred[0] == first_para and first_para != ""
                 ):
-                    token_start_index += 1
+                    fallback_cases += 1
+            fallback_rate = fallback_cases / len(df)
+            fallback_label = f"{fallback_rate * 100:.2f}% (تخمینی، نه دقیق)"
 
-                token_end_index = len(input_ids) - 1
-                while token_end_index >= 0 and sequence_ids[token_end_index] != 1:
-                    token_end_index -= 1
+        # Group stats for JSON export
+        summary_metrics = {
+            "task1_accuracy": acc,
+            "task1_macro_f1": macro_f1,
+            "task2_mean_bleu": mean_bleu,
+            "task2_mean_rouge_l": mean_rouge,
+            "task2_cls_fallback_rate": fallback_rate,
+            "task2_cls_fallback_label": fallback_label,
+            "task1_by_type": {
+                tag: {
+                    "precision": report_dict[tag]["precision"],
+                    "recall": report_dict[tag]["recall"],
+                    "f1": report_dict[tag]["f1-score"],
+                }
+                for tag in SPOILER_LABELS
+                if tag in report_dict
+            },
+            "task2_by_type": {
+                tag: {
+                    "mean_bleu": float(df[df["true_tag"] == tag]["bleu"].mean()),
+                    "mean_rouge": float(df[df["true_tag"] == tag]["rouge_l"].mean()),
+                }
+                for tag in SPOILER_LABELS
+            },
+        }
 
-                # Detect if the answer window falls completely inside this token slice
-                if not (
-                    offsets[token_start_index][0] <= start_char
-                    and offsets[token_end_index][1] >= end_char
-                ):
-                    tokenized_examples["start_positions"].append(cls_index)
-                    tokenized_examples["end_positions"].append(cls_index)
+        # Save structured machine-readable JSON
+        with open(
+            os.path.join(self.report_dir, "metrics_summary.json"), "w", encoding="utf-8"
+        ) as f:
+            json.dump(summary_metrics, f, indent=4)
 
-                    self.fallback_count += 1
-                    self.tag_fallbacks[tag] = self.tag_fallbacks.get(tag, 0) + 1
-
-                    # Downgraded from warning to info to keep logs clean during sliding window splits
-                    self.logger.info(
-                        f"Answer span outside active token window for uuid: {uuids[sample_index]}. "
-                        f"Falling back to CLS index. Tag: {tag}"
-                    )
-                else:
-                    while (
-                        token_start_index < len(offsets)
-                        and offsets[token_start_index][0] <= start_char
-                    ):
-                        token_start_index += 1
-                    tokenized_examples["start_positions"].append(token_start_index - 1)
-
-                    while (
-                        token_end_index >= 0 and offsets[token_end_index][1] >= end_char
-                    ):
-                        token_end_index -= 1
-                    tokenized_examples["end_positions"].append(token_end_index + 1)
-
-        # Print structured statistical evaluation inside logs
-        if self.total_processed > 0:
-            phrase_rate = (
-                self.tag_fallbacks["phrase"] / max(1, self.tag_totals.get("phrase", 0))
-            ) * 100
-            passage_rate = (
-                self.tag_fallbacks["passage"]
-                / max(1, self.tag_totals.get("passage", 0))
-            ) * 100
-            multi_rate = (
-                self.tag_fallbacks["multi"] / max(1, self.tag_totals.get("multi", 0))
-            ) * 100
-
-            self.logger.info(
-                f"Data preprocessing chunk complete. Statistics:\n"
-                f"  - Total processed: {self.total_processed}\n"
-                f"  - Overall CLS Fallbacks: {self.fallback_count} ({self.fallback_count / self.total_processed * 100:.2f}%)\n"
-                f"  - Phrase fallbacks: {self.tag_fallbacks['phrase']}/{self.tag_totals.get('phrase', 0)} ({phrase_rate:.2f}%)\n"
-                f"  - Passage fallbacks: {self.tag_fallbacks['passage']}/{self.tag_totals.get('passage', 0)} ({passage_rate:.2f}%)\n"
-                f"  - Multi fallbacks: {self.tag_fallbacks['multi']}/{self.tag_totals.get('multi', 0)} ({multi_rate:.2f}%)"
+        # Get 5 worst performing predictions for error analysis
+        worst_df = df.sort_values(by="bleu").head(5)
+        worst_cases = []
+        for _, row in worst_df.iterrows():
+            worst_cases.append(
+                {
+                    "uuid": row["uuid"],
+                    "true_tag": row["true_tag"],
+                    "gt": " | ".join(row["spoiler_true"])
+                    if isinstance(row["spoiler_true"], list)
+                    else str(row["spoiler_true"]),
+                    "pred": " | ".join(row["spoiler_pred"])
+                    if isinstance(row["spoiler_pred"], list)
+                    else str(row["spoiler_pred"]),
+                    "bleu": float(row["bleu"]),
+                }
             )
 
-        return tokenized_examples
+        # 3. Generate visual HTML report
+        self._generate_html_report(summary_metrics, worst_cases)
+        logger.info(
+            f"Visual metrics report compiled successfully at: {self.report_dir}"
+        )
