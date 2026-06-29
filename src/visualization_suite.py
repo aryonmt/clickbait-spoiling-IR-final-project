@@ -324,7 +324,7 @@ class EvaluationReportBuilder:
             </div>
             <div class="card" style="text-align: center;">
                 <p>Task 2 CLS Fallback Rate</p>
-                <p class="metric-value">{summary["task2_cls_fallback_rate"] * 100:.2f}%</p>
+                <p class="metric-value">{summary["task2_cls_fallback_label"]}</p>
             </div>
         </div>
     </div>
@@ -426,22 +426,52 @@ class EvaluationReportBuilder:
         self._plot_task2_by_type(df)
         self._plot_length_comparison(df)
 
-        # Calculate real Task 2 CLS fallback rates directly from aligned files
-        fallback_cases = 0
-        for _, row in df.iterrows():
-            pred = row["spoiler_pred"]
-            paragraphs = row["targetParagraphs"]
-            first_para = (
-                paragraphs[0]
-                if isinstance(paragraphs, list) and len(paragraphs) > 0
-                else ""
-            )
-            if not pred or (
-                len(pred) == 1 and pred[0] == first_para and first_para != ""
-            ):
-                fallback_cases += 1
+        # Phase 3.2: Safely parse fallback rate from real label quality statistics if available
+        fallback_rate = 0.0
+        fallback_label = ""
 
-        fallback_rate = fallback_cases / len(df)
+        # Look for preprocessing statistics JSON inside predictions parallel folder
+        stats_path = os.path.join(
+            os.path.dirname(self.predictions_path), "label_quality_stats.json"
+        )
+        alt_stats_path = "results_qa/label_quality_stats.json"
+
+        stats_file = (
+            stats_path
+            if os.path.exists(stats_path)
+            else (alt_stats_path if os.path.exists(alt_stats_path) else None)
+        )
+
+        if stats_file:
+            try:
+                with open(stats_file, "r", encoding="utf-8") as f:
+                    stats_data = json.load(f)
+                fallback_rate = stats_data.get("fallback_rate", 0.0)
+                fallback_label = f"{fallback_rate * 100:.2f}%"
+                logger.info(f"Loaded exact CLS fallback rate from: {stats_file}")
+            except Exception as e:
+                logger.warning(
+                    f"Error parsing stats JSON file: {e}. Reverting to estimation."
+                )
+                stats_file = None
+
+        if not stats_file:
+            # Revert back to estimated proxies if the label stats are missing
+            fallback_cases = 0
+            for _, row in df.iterrows():
+                pred = row["spoiler_pred"]
+                paragraphs = row["targetParagraphs"]
+                first_para = (
+                    paragraphs[0]
+                    if isinstance(paragraphs, list) and len(paragraphs) > 0
+                    else ""
+                )
+                if not pred or (
+                    len(pred) == 1 and pred[0] == first_para and first_para != ""
+                ):
+                    fallback_cases += 1
+            fallback_rate = fallback_cases / len(df)
+            fallback_label = f"{fallback_rate * 100:.2f}% (تخمینی، نه دقیق)"
 
         # Group stats for JSON export
         summary_metrics = {
@@ -450,6 +480,7 @@ class EvaluationReportBuilder:
             "task2_mean_bleu": mean_bleu,
             "task2_mean_rouge_l": mean_rouge,
             "task2_cls_fallback_rate": fallback_rate,
+            "task2_cls_fallback_label": fallback_label,
             "task1_by_type": {
                 tag: {
                     "precision": report_dict[tag]["precision"],
