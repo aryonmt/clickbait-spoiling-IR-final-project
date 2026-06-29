@@ -30,6 +30,10 @@ class PipelineConfig:
     task2_epochs: int = 3
     task2_weight_decay: float = 0.01
 
+    # Multi-generator parameters (Phase 4)
+    task2_multi_method: str = "tfidf"  # Can be 'jaccard' or 'tfidf'
+    task2_multi_top_k: int = 3  # Optimal k-value extracted from comparisons
+
     def __post_init__(self) -> None:
         """Create necessary output and logging directories."""
         os.makedirs(self.output_dir, exist_ok=True)

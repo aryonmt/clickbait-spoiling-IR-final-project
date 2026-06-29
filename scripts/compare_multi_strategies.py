@@ -45,7 +45,7 @@ def evaluate_predictions(ground_truths: list, predictions: list):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="A/B Test Multi-type Spoiler Generation Strategies"
+        description="Multi-type Spoiler Generation A/B/C Test Suite"
     )
     parser.add_argument(
         "--val_path",
@@ -59,63 +59,95 @@ def main():
         print(f"[ERROR] Validation file not found at: {args.val_path}")
         return
 
-    # 1. Load Validation Data
     loader = JSONLLoader(args.val_path)
     df = loader.load_data()
 
-    # 2. Filter strictly for 'multi' tag cases
     multi_df = df[df["tags"].apply(extract_primary_tag) == "multi"].copy()
     total_cases = len(multi_df)
     print(f"\nEvaluating {total_cases} multi-type spoiler cases...")
 
     ground_truths = multi_df["spoiler"].tolist()
 
-    # Strategy A: Baseline Heuristics (first sentences of top 3 paragraphs)
+    # Strategy A: Baseline Heuristic (combines first sentences of top 3 paragraphs)
     predicted_spoilers_a = []
     for _, row in multi_df.iterrows():
         paragraphs = row["targetParagraphs"]
         spoilers_a = HeuristicSpoilerGenerator._extract_heuristic(paragraphs, "multi")
         predicted_spoilers_a.append(spoilers_a)
-
-    # Strategy B: New Retrieval Spoiler Generator (Top-3 lexically ranked sentences)
-    predicted_spoilers_b = []
-    for _, row in multi_df.iterrows():
-        post_text = (
-            " ".join(row["postText"])
-            if isinstance(row["postText"], list)
-            else str(row["postText"])
-        )
-        paragraphs = row["targetParagraphs"]
-        spoilers_b = RetrievalSpoilerGenerator.generate_multi_spoiler(
-            post_text, paragraphs, top_k=3
-        )
-        predicted_spoilers_b.append(spoilers_b)
-
-    # 3. Evaluate Metrics
     bleu_a, rouge_a = evaluate_predictions(ground_truths, predicted_spoilers_a)
-    bleu_b, rouge_b = evaluate_predictions(ground_truths, predicted_spoilers_b)
 
-    print("\n==========================================")
-    print("A/B TEST REPORT: MULTI-TYPE GENERATION STRATEGY")
-    print("==========================================")
-    print("Strategy A: Baseline Heuristics")
+    print(
+        "\n=========================================================================="
+    )
+    print("A/B/C TEST REPORT: MULTI-TYPE GENERATION STRATEGY")
+    print("==========================================================================")
+    print("Strategy A: Baseline Heuristics (First-sentence heuristics)")
     print(f"  - Mean BLEU:    {bleu_a:.4f}")
     print(f"  - Mean ROUGE-L: {rouge_a:.4f}")
-    print("------------------------------------------")
-    print("Strategy B: New Retrieval Spoiler Generator (Jaccard Rank)")
-    print(f"  - Mean BLEU:    {bleu_b:.4f}")
-    print(f"  - Mean ROUGE-L: {rouge_b:.4f}")
-    print("==========================================")
+    print("--------------------------------------------------------------------------")
 
-    # Conclusion
-    if bleu_b > bleu_a or rouge_b > rouge_a:
-        improvement_bleu = ((bleu_b - bleu_a) / max(0.01, bleu_a)) * 100
-        improvement_rouge = ((rouge_b - rouge_a) / max(0.01, rouge_a)) * 100
-        print("[SUCCESS] Strategy B outperforms Strategy A!")
-        print(f"  - BLEU Relative Improvement:    +{improvement_bleu:.2f}%")
-        print(f"  - ROUGE-L Relative Improvement: +{improvement_rouge:.2f}%")
-    else:
-        print("[WARNING] Strategy B did not outperform Strategy A on these metrics.")
+    best_strategy = "Strategy A"
+    best_bleu = bleu_a
+    best_rouge = rouge_a
+    best_k = 3
+
+    # Compare Jaccard and TF-IDF across different k-values (2, 3, 4, 5)
+    for k in [2, 3, 4, 5]:
+        # Strategy B: Jaccard
+        pred_jaccard = []
+        for _, row in multi_df.iterrows():
+            post_text = (
+                " ".join(row["postText"])
+                if isinstance(row["postText"], list)
+                else str(row["postText"])
+            )
+            paragraphs = row["targetParagraphs"]
+            spoilers = RetrievalSpoilerGenerator.generate_multi_spoiler(
+                post_text, paragraphs, top_k=k, method="jaccard"
+            )
+            pred_jaccard.append(spoilers)
+        bleu_j, rouge_j = evaluate_predictions(ground_truths, pred_jaccard)
+        print(f"Strategy B: Jaccard Retrieval (top_k={k})")
+        print(f"  - Mean BLEU:    {bleu_j:.4f} | ROUGE-L: {rouge_j:.4f}")
+
+        if bleu_j > best_bleu:
+            best_bleu = bleu_j
+            best_rouge = rouge_j
+            best_strategy = f"Strategy B (Jaccard, top_k={k})"
+            best_k = k
+
+        # Strategy C: TF-IDF
+        pred_tfidf = []
+        for _, row in multi_df.iterrows():
+            post_text = (
+                " ".join(row["postText"])
+                if isinstance(row["postText"], list)
+                else str(row["postText"])
+            )
+            paragraphs = row["targetParagraphs"]
+            spoilers = RetrievalSpoilerGenerator.generate_multi_spoiler(
+                post_text, paragraphs, top_k=k, method="tfidf"
+            )
+            pred_tfidf.append(spoilers)
+        bleu_t, rouge_t = evaluate_predictions(ground_truths, pred_tfidf)
+        print(f"Strategy C: TF-IDF Cosine Retrieval (top_k={k})")
+        print(f"  - Mean BLEU:    {bleu_t:.4f}")
+        print(f"  - Mean ROUGE-L: {rouge_t:.4f}")
+        print(
+            "--------------------------------------------------------------------------"
+        )
+
+        if bleu_t > best_bleu:
+            best_bleu = bleu_t
+            best_rouge = rouge_t
+            best_strategy = f"Strategy C (TF-IDF, top_k={k})"
+            best_k = k
+
+    print(f"[SUCCESS] Winner identified: {best_strategy}")
+    print(f"  - Optimal k:       {best_k}")
+    print(f"  - Winning BLEU:    {best_bleu:.4f}")
+    print(f"  - Winning ROUGE-L: {best_rouge:.4f}")
+    print("==========================================================================")
 
 
 if __name__ == "__main__":

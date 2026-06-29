@@ -15,7 +15,7 @@ env/
 # Project specific artifacts
 logs/
 outputs/
-results_task1/
+results_task1*/
 results_qa/
 data/
 

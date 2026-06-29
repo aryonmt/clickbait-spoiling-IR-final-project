@@ -11,6 +11,7 @@ from transformers import (
     Trainer,
 )
 
+from src.config import PipelineConfig
 from src.data_loader import JSONLLoader
 from src.evaluation import AdvancedEvaluationSuite
 from src.logging_setup import setup_logger
@@ -118,9 +119,10 @@ class ClickbaitIntegratedPipeline:
     and Task 2 token span extraction.
     """
 
-    def __init__(self, task1_dir: str, task2_dir: str, max_length: int = 512):
+    def __init__(self, task1_dir: str, task2_dir: str, config: PipelineConfig):
         logger.info("Initializing Clickbait Spoiler Integrated Pipeline...")
-        self.max_length = max_length
+        self.config = config
+        self.max_length = config.task2_max_length
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Load Task 1 Model
@@ -142,7 +144,7 @@ class ClickbaitIntegratedPipeline:
         """Executes the complete integrated evaluation flow across the input dataframe.
 
         Args:
-            df (pd.DataFrame): Input dataframe containing clickbait samples.
+            df (pd.DataFrame): Input dataframe containing challenge samples.
 
         Returns:
             tuple: (predicted_tags, predicted_spoilers, confidence_scores) lists.
@@ -197,7 +199,10 @@ class ClickbaitIntegratedPipeline:
                 )
                 paragraphs = row["targetParagraphs"]
                 spoiler = RetrievalSpoilerGenerator.generate_multi_spoiler(
-                    post_text, paragraphs, top_k=3
+                    post_text=post_text,
+                    paragraphs=paragraphs,
+                    top_k=self.config.task2_multi_top_k,
+                    method=self.config.task2_multi_method,
                 )
             else:
                 # Route 'phrase' and 'passage' classes to Transformer QA Extractor
@@ -248,8 +253,11 @@ def main():
     logger.info("Loading validation data...")
     val_df = JSONLLoader(args.val_path).load_data()
 
+    # Initialize configuration with dynamically defined parameters
+    config = PipelineConfig()
+
     pipeline = ClickbaitIntegratedPipeline(
-        task1_dir=args.t1_checkpoint, task2_dir=args.t2_checkpoint
+        task1_dir=args.t1_checkpoint, task2_dir=args.t2_checkpoint, config=config
     )
 
     pred_tags, pred_spoilers, confidence_scores = pipeline.run_inference(val_df)
@@ -262,14 +270,14 @@ def main():
     AdvancedEvaluationSuite.evaluate_task1(y_true_tags, pred_tags)
     AdvancedEvaluationSuite.evaluate_task2(ground_truth_spoilers, pred_spoilers)
 
-    # Save standardized submission artifact for evaluations
+    # Save standardized submission artifact for evaluations with confidence metrics
     logger.info(f"Saving final pipeline output file to {args.output_path}...")
     output_records = [
         {
             "uuid": row["uuid"],
             "spoilerType": pred_tags[i],
             "spoiler": pred_spoilers[i],
-            "confidence": confidence_scores[i],  # Export confidence to JSON
+            "confidence": confidence_scores[i],
         }
         for i, row in val_df.iterrows()
     ]
