@@ -252,7 +252,7 @@ def main():
         task1_dir=args.t1_checkpoint, task2_dir=args.t2_checkpoint
     )
 
-    pred_tags, pred_spoilers = pipeline.run_inference(val_df)
+    pred_tags, pred_spoilers, confidence_scores = pipeline.run_inference(val_df)
 
     # Multi-metric baseline performance scoring
     y_true_tags = val_df["tags"].apply(extract_primary_tag).tolist()
@@ -265,7 +265,12 @@ def main():
     # Save standardized submission artifact for evaluations
     logger.info(f"Saving final pipeline output file to {args.output_path}...")
     output_records = [
-        {"uuid": row["uuid"], "spoilerType": pred_tags[i], "spoiler": pred_spoilers[i]}
+        {
+            "uuid": row["uuid"],
+            "spoilerType": pred_tags[i],
+            "spoiler": pred_spoilers[i],
+            "confidence": confidence_scores[i],  # Export confidence to JSON
+        }
         for i, row in val_df.iterrows()
     ]
     pd.DataFrame(output_records).to_json(args.output_path, orient="records", lines=True)
