@@ -150,6 +150,8 @@ class TransformerSpoilerClassifier:
             fp16=False,  # Safely disabled to prevent unscaling defects
             gradient_accumulation_steps=2,
             warmup_ratio=0.1,
+            adam_epsilon=1e-6,  # Crucial fix to prevent DeBERTa-v3 numerical instability and NaN gradients
+            max_grad_norm=1.0,  # Strictly enforce gradient clipping limit
             report_to="none",
         )
 
