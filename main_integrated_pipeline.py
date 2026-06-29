@@ -142,10 +142,10 @@ class ClickbaitIntegratedPipeline:
         """Executes the complete integrated evaluation flow across the input dataframe.
 
         Args:
-            df (pd.DataFrame): Input dataframe containing challenge samples.
+            df (pd.DataFrame): Input dataframe containing clickbait samples.
 
         Returns:
-            tuple: (predicted_tags, predicted_spoilers) lists.
+            tuple: (predicted_tags, predicted_spoilers, confidence_scores) lists.
         """
         # --- Task 1: Predict Spoiler Types ---
         processed_t1 = pd.DataFrame()
@@ -168,8 +168,18 @@ class ClickbaitIntegratedPipeline:
         logger.info("Running Task 1 Model Inference...")
         trainer = Trainer(model=self.t1_model, processing_class=self.t1_tokenizer)
         t1_preds = trainer.predict(t1_tokenized)
+
+        # Calculate softmax probabilities to extract confidence metrics (Phase 4)
+        logits_tensor = torch.tensor(t1_preds.predictions)
+        probs = torch.nn.functional.softmax(logits_tensor, dim=-1).numpy()
+
         predicted_t1_ids = np.argmax(t1_preds.predictions, axis=-1)
         predicted_tags = [self.t1_id_to_label[idx] for idx in predicted_t1_ids]
+
+        # Save confidence score of the predicted class for each prediction
+        confidence_scores = [
+            float(probs[i, idx]) for i, idx in enumerate(predicted_t1_ids)
+        ]
 
         # --- Task 2: Robust Spoiler Span Extraction ---
         logger.info("Running Task 2 Model Inference with Safe Boundary Mapping...")
@@ -187,7 +197,7 @@ class ClickbaitIntegratedPipeline:
                 )
                 paragraphs = row["targetParagraphs"]
                 spoiler = RetrievalSpoilerGenerator.generate_multi_spoiler(
-                    post_text=post_text, paragraphs=paragraphs, top_k=3
+                    post_text, paragraphs, top_k=3
                 )
             else:
                 # Route 'phrase' and 'passage' classes to Transformer QA Extractor
@@ -208,7 +218,7 @@ class ClickbaitIntegratedPipeline:
 
             predicted_spoilers.append(spoiler)
 
-        return predicted_tags, predicted_spoilers
+        return predicted_tags, predicted_spoilers, confidence_scores
 
 
 def main():

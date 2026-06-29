@@ -37,7 +37,6 @@ class EvaluationReportBuilder:
         val_df = pd.read_json(self.val_path, lines=True)
         pred_df = pd.read_json(self.predictions_path, lines=True)
 
-        # Merge safely on uuid to align indices perfectly
         merged_df = pd.merge(val_df, pred_df, on="uuid", suffixes=("_true", "_pred"))
         logger.info(f"Successfully aligned {len(merged_df)} validation samples.")
         return merged_df
@@ -104,10 +103,9 @@ class EvaluationReportBuilder:
 
     def _plot_classification_metrics(self, report_dict: dict):
         """Generates and saves bar plots of precision, recall, and f1 scores."""
-        classes = ["phrase", "passage", "multi"]
         metrics_data = []
 
-        for cls in classes:
+        for cls in SPOILER_LABELS:
             if cls in report_dict:
                 metrics_data.append(
                     {
@@ -131,6 +129,86 @@ class EvaluationReportBuilder:
         plt.savefig(
             os.path.join(self.report_dir, "classification_metrics.png"), dpi=150
         )
+        plt.close()
+
+    def _plot_confidence_distribution(self, df: pd.DataFrame):
+        """Generates a histogram comparing confidence scores for correct vs incorrect predictions."""
+        if "confidence" not in df.columns:
+            logger.warning(
+                "Softmax confidence scores not found in predictions. Skipping histogram."
+            )
+            return
+
+        df["is_correct"] = df["true_tag"] == df["pred_tag"]
+
+        plt.figure(figsize=(7, 5))
+        sns.histplot(
+            data=df,
+            x="confidence",
+            hue="is_correct",
+            multiple="stack",
+            palette={True: "mediumseagreen", False: "salmon"},
+            bins=20,
+            alpha=0.8,
+        )
+        plt.title("Task 1: Prediction Confidence Distribution")
+        plt.xlabel("Probability Confidence")
+        plt.ylabel("Sample Count")
+        plt.tight_layout()
+
+        plt.savefig(
+            os.path.join(self.report_dir, "confidence_distribution.png"), dpi=150
+        )
+        plt.close()
+
+    def _plot_error_by_length(self, df: pd.DataFrame):
+        """Generates a bar plot showing error rates categorized by the article length (word counts)."""
+        df["article_len"] = df["targetParagraphs"].apply(
+            lambda x: len(" ".join(x).split()) if isinstance(x, list) else 0
+        )
+        df["is_correct"] = df["true_tag"] == df["pred_tag"]
+
+        # Categorize length into bins
+        def get_bin(length):
+            if length < 200:
+                return "Short (<200w)"
+            elif length < 600:
+                return "Medium (200w-600w)"
+            return "Long (>600w)"
+
+        df["length_bin"] = df["article_len"].apply(get_bin)
+
+        # Calculate error rates per bin
+        binned = (
+            df.groupby("length_bin")["is_correct"]
+            .value_counts(normalize=True)
+            .unstack()
+            .fillna(0)
+        )
+        if False in binned.columns:
+            binned["error_rate"] = binned[False]
+        else:
+            binned["error_rate"] = 0.0
+
+        # Standardize bin orders
+        bin_order = ["Short (<200w)", "Medium (200w-600w)", "Long (>600w)"]
+        binned = binned.reindex(bin_order).fillna(0)
+
+        plt.figure(figsize=(7, 5))
+        sns.barplot(
+            x=binned.index,
+            y=binned["error_rate"] * 100,
+            palette="Oranges_r",
+            hue=binned.index,
+            legend=False,
+        )
+        plt.title("Task 1: Error Rate by Article Word Count")
+        plt.xlabel("Article Length Group")
+        plt.ylabel("Error Rate (%)")
+        plt.ylim(0, 100)
+        plt.tight_layout()
+
+        plt.savefig(os.path.join(self.report_dir, "error_by_length.png"), dpi=150)
         plt.close()
 
     def _plot_task2_by_type(self, df: pd.DataFrame):
@@ -203,10 +281,11 @@ class EvaluationReportBuilder:
 
     def _generate_html_report(self, summary: dict, worst_cases: list):
         """Creates an integrated HTML page showcasing metrics and plots."""
+        # Include confidence and length bin charts in HTML grid
         html_content = f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>Clickbait Spoiling System Evaluation</title>
+    <title>Clickbait Spoiling System Evaluation — Version 2</title>
     <style>
         body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 40px; background-color: #f8f9fa; color: #333; }}
         h1, h2 {{ color: #2c3e50; border-bottom: 2px solid #ecf0f1; padding-bottom: 10px; }}
@@ -221,12 +300,12 @@ class EvaluationReportBuilder:
     </style>
 </head>
 <body>
-    <h1>Clickbait Spoiling Evaluation Report</h1>
+    <h1>Clickbait Spoiling Evaluation Report (V2 Pipeline)</h1>
     <p>Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
 
     <div class="card">
         <h2>System Performance Metrics</h2>
-        <div class="grid" style="grid-template-columns: repeat(4, 1fr);">
+        <div class="grid" style="grid-template-columns: repeat(5, 1fr);">
             <div class="card" style="text-align: center;">
                 <p>Task 1 Macro F1</p>
                 <p class="metric-value">{summary["task1_macro_f1"]:.4f}</p>
@@ -243,6 +322,10 @@ class EvaluationReportBuilder:
                 <p>Task 2 Mean ROUGE-L</p>
                 <p class="metric-value">{summary["task2_mean_rouge_l"]:.4f}</p>
             </div>
+            <div class="card" style="text-align: center;">
+                <p>Task 2 CLS Fallback Rate</p>
+                <p class="metric-value">{summary["task2_cls_fallback_rate"] * 100:.2f}%</p>
+            </div>
         </div>
     </div>
 
@@ -254,6 +337,17 @@ class EvaluationReportBuilder:
         <div class="card">
             <h2>Task 1: Metrics per Class</h2>
             <img src="classification_metrics.png" alt="Classification Metrics">
+        </div>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h2>Task 1: Confidence Distribution</h2>
+            <img src="confidence_distribution.png" alt="Confidence Distribution">
+        </div>
+        <div class="card">
+            <h2>Task 1: Error Rate by Length</h2>
+            <img src="error_by_length.png" alt="Error rate by Length">
         </div>
     </div>
 
@@ -322,6 +416,8 @@ class EvaluationReportBuilder:
 
         self._plot_confusion_matrix(y_true, y_pred)
         self._plot_classification_metrics(report_dict)
+        self._plot_confidence_distribution(df)
+        self._plot_error_by_length(df)
 
         # 2. Task 2 Metrics
         mean_bleu = df["bleu"].mean()
@@ -330,19 +426,37 @@ class EvaluationReportBuilder:
         self._plot_task2_by_type(df)
         self._plot_length_comparison(df)
 
+        # Calculate real Task 2 CLS fallback rates directly from aligned files
+        fallback_cases = 0
+        for _, row in df.iterrows():
+            pred = row["spoiler_pred"]
+            paragraphs = row["targetParagraphs"]
+            first_para = (
+                paragraphs[0]
+                if isinstance(paragraphs, list) and len(paragraphs) > 0
+                else ""
+            )
+            if not pred or (
+                len(pred) == 1 and pred[0] == first_para and first_para != ""
+            ):
+                fallback_cases += 1
+
+        fallback_rate = fallback_cases / len(df)
+
         # Group stats for JSON export
         summary_metrics = {
             "task1_accuracy": acc,
             "task1_macro_f1": macro_f1,
             "task2_mean_bleu": mean_bleu,
             "task2_mean_rouge_l": mean_rouge,
+            "task2_cls_fallback_rate": fallback_rate,
             "task1_by_type": {
                 tag: {
                     "precision": report_dict[tag]["precision"],
                     "recall": report_dict[tag]["recall"],
                     "f1": report_dict[tag]["f1-score"],
                 }
-                for tag in ["phrase", "passage", "multi"]
+                for tag in SPOILER_LABELS
                 if tag in report_dict
             },
             "task2_by_type": {
@@ -350,7 +464,7 @@ class EvaluationReportBuilder:
                     "mean_bleu": float(df[df["true_tag"] == tag]["bleu"].mean()),
                     "mean_rouge": float(df[df["true_tag"] == tag]["rouge_l"].mean()),
                 }
-                for tag in ["phrase", "passage", "multi"]
+                for tag in SPOILER_LABELS
             },
         }
 
