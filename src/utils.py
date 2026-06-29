@@ -1,5 +1,8 @@
 from typing import List, Union
 
+# Global constant for strict label ordering across evaluation and visualization
+SPOILER_LABELS = ["phrase", "passage", "multi"]
+
 
 def extract_primary_tag(tag_input: Union[str, List[str]]) -> str:
     """Extracts the first string tag if the input is a list, otherwise returns

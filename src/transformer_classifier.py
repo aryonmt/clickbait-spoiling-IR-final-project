@@ -13,6 +13,7 @@ from transformers import (
     set_seed,
 )
 
+from src.config import PipelineConfig
 from src.utils import extract_primary_tag
 
 # Enforce global reproducibility across all initializations
@@ -21,7 +22,6 @@ set_seed(42)
 
 class ClickbaitWeightedTrainer(Trainer):
     """Custom Trainer overriding compute_loss to handle class imbalance via
-
     Weighted Cross-Entropy.
     """
 
@@ -50,16 +50,14 @@ class ClickbaitWeightedTrainer(Trainer):
 
 class TransformerSpoilerClassifier:
     """A fully modular, encapsulated pipeline for training and evaluating
-
     Transformer-based sequence classifiers.
     """
 
-    def __init__(
-        self, model_name: str = "roberta-base", max_length: int = 512, lr: float = 1e-5
-    ):
-        self.model_name = model_name
-        self.max_length = max_length
-        self.lr = lr
+    def __init__(self, config: PipelineConfig):
+        self.config = config
+        self.model_name = config.task1_model_name
+        self.max_length = config.task1_max_length
+        self.lr = config.task1_lr
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
 
         self.label_to_id = {"phrase": 0, "passage": 1, "multi": 2}
@@ -67,7 +65,6 @@ class TransformerSpoilerClassifier:
 
     def _prepare_dataset(self, df: pd.DataFrame) -> Dataset:
         """Processes dataframe fields into tokenized text-pairs using standard
-
         utilities.
         """
         processed_df = pd.DataFrame()
@@ -95,7 +92,6 @@ class TransformerSpoilerClassifier:
 
     def _calculate_class_weights(self, df: pd.DataFrame) -> list:
         """Computes inverse frequency class weights to address training dataset
-
         imbalance.
         """
         labels = df["tags"].apply(extract_primary_tag).map(self.label_to_id).values
@@ -105,13 +101,11 @@ class TransformerSpoilerClassifier:
         weights = total_samples / (3.0 * class_counts)
         return weights.tolist()
 
-    def train_pipeline(
-        self, train_df: pd.DataFrame, val_df: pd.DataFrame, output_dir: str
-    ):
+    def train_pipeline(self, train_df: pd.DataFrame, val_df: pd.DataFrame):
         """Executes full tokenization, model initialization, and full-precision
-
         weighted training loop.
         """
+        output_dir = self.config.output_dir
         print(f"Mapping and processing partitions for: {self.model_name}")
         train_dataset = self._prepare_dataset(train_df)
         val_dataset = self._prepare_dataset(val_df)
@@ -124,7 +118,7 @@ class TransformerSpoilerClassifier:
             num_labels=3,
             id2label=self.id_to_label,
             label2id=self.label_to_id,
-            ignore_mismatched_sizes=True,  # Added to robustly handle layer size mismatch during fine-tuning
+            ignore_mismatched_sizes=self.config.task1_ignore_mismatched_sizes,  # Mismatches strictly managed via configuration
         )
 
         def compute_metrics(eval_pred):
@@ -138,20 +132,20 @@ class TransformerSpoilerClassifier:
         training_args = TrainingArguments(
             output_dir=output_dir,
             learning_rate=self.lr,
-            per_device_train_batch_size=8,
-            per_device_eval_batch_size=8,
-            num_train_epochs=3,
-            weight_decay=0.01,
+            per_device_train_batch_size=self.config.task1_batch_size,
+            per_device_eval_batch_size=self.config.task1_batch_size,
+            num_train_epochs=self.config.task1_epochs,  # Read epochs directly from config
+            weight_decay=self.config.task1_weight_decay,
             eval_strategy="epoch",
             save_strategy="epoch",
             load_best_model_at_end=True,
             metric_for_best_model="f1",
-            logging_steps=10,  # Fine-grained tracking to observe early divergence
-            fp16=False,  # Safely disabled to prevent unscaling defects
+            logging_steps=10,
+            fp16=False,
             gradient_accumulation_steps=2,
             warmup_ratio=0.1,
-            adam_epsilon=1e-6,  # Crucial fix to prevent DeBERTa-v3 numerical instability and NaN gradients
-            max_grad_norm=1.0,  # Strictly enforce gradient clipping limit
+            adam_epsilon=1e-6,
+            max_grad_norm=1.0,
             report_to="none",
         )
 

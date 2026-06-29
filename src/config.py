@@ -19,6 +19,7 @@ class PipelineConfig:
     task1_lr: float = 2e-5
     task1_epochs: int = 5
     task1_weight_decay: float = 0.01
+    task1_ignore_mismatched_sizes: bool = False
 
     # Task 2 - QA / Extraction
     task2_model_name: str = "deepset/roberta-base-squad2"

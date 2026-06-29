@@ -8,6 +8,7 @@ from transformers import (
     TrainingArguments,
 )
 
+from src.config import PipelineConfig
 from src.data_loader import JSONLLoader
 from src.qa_preprocessor import QAPreprocessor
 
@@ -22,22 +23,25 @@ def main():
     parser.add_argument(
         "--val_path", type=str, required=True, help="Path to validation JSONL file"
     )
+    parser.add_argument("--model_name", type=str, help="Base QA model from HF Hub")
     parser.add_argument(
-        "--model_name",
-        type=str,
-        default="deepset/roberta-base-squad2",
-        help="Base QA model from HF Hub",
+        "--output_dir", type=str, help="Directory to save QA checkpoints"
     )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="./results_qa",
-        help="Directory to save QA checkpoints",
-    )
-    parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate")
+    parser.add_argument("--lr", type=float, help="Learning rate")
+    parser.add_argument("--epochs", type=int, help="Number of training epochs")
     args = parser.parse_args()
 
-    # 1. Load Datasets
+    config = PipelineConfig()
+    if args.model_name:
+        config.task2_model_name = args.model_name
+    if args.output_dir:
+        config.output_dir = args.output_dir
+    if args.lr:
+        config.task2_lr = args.lr
+    if args.epochs:
+        config.task2_epochs = args.epochs
+
+    # Load Datasets
     print("Loading datasets for QA Extraction...")
     train_df = JSONLLoader(args.train_path).load_data()
     val_df = JSONLLoader(args.val_path).load_data()
@@ -45,9 +49,13 @@ def main():
     train_dataset = Dataset.from_pandas(train_df)
     val_dataset = Dataset.from_pandas(val_df)
 
-    # 2. Map spans natively via token grids
-    print(f"Tokenizing and mapping text spans using: {args.model_name}")
-    preprocessor = QAPreprocessor(model_name=args.model_name)
+    # Prepare features utilizing configurations
+    print(f"Tokenizing and mapping text spans using: {config.task2_model_name}")
+    preprocessor = QAPreprocessor(
+        model_name=config.task2_model_name,
+        max_length=config.task2_max_length,
+        doc_stride=config.task2_doc_stride,
+    )
 
     train_tokenized = train_dataset.map(
         preprocessor.prepare_train_features,
@@ -60,24 +68,22 @@ def main():
         remove_columns=val_dataset.column_names,
     )
 
-    # 3. Load pre-configured QA Architecture
-    model = AutoModelForQuestionAnswering.from_pretrained(args.model_name)
+    model = AutoModelForQuestionAnswering.from_pretrained(config.task2_model_name)
 
-    # 4. Enforce strict training arguments
     training_args = TrainingArguments(
-        output_dir=args.output_dir,
-        eval_strategy="epoch",  # Changed from evaluation_strategy to support HF v5+
+        output_dir=config.output_dir,
+        eval_strategy="epoch",
         save_strategy="epoch",
-        learning_rate=args.lr,
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=8,
-        num_train_epochs=3,
-        weight_decay=0.01,
+        learning_rate=config.task2_lr,
+        per_device_train_batch_size=config.task2_batch_size,
+        per_device_eval_batch_size=config.task2_batch_size,
+        num_train_epochs=config.task2_epochs,
+        weight_decay=config.task2_weight_decay,
         logging_steps=10,
         load_best_model_at_end=True,
         metric_for_best_model="loss",
         greater_is_better=False,
-        fp16=True,  # Speed up training via Kaggle T4 GPU
+        fp16=True,
         report_to="none",
     )
 
@@ -93,8 +99,8 @@ def main():
     print("\n=== LAUNCHING EXTRACTIVE TRANSFORMER QA TRAIN SEQUENCE ===")
     trainer.train()
 
-    print(f"Saving optimized Task 2 QA model weights to {args.output_dir}...")
-    trainer.save_model(args.output_dir)
+    print(f"Saving optimized Task 2 QA model weights to {config.output_dir}...")
+    trainer.save_model(config.output_dir)
     print("[SUCCESS] Training execution routine complete.")
 
 

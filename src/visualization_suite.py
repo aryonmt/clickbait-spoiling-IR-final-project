@@ -10,7 +10,7 @@ from rouge_score import rouge_scorer
 from sklearn.metrics import classification_report, confusion_matrix
 
 from src.logging_setup import setup_logger
-from src.utils import extract_primary_tag
+from src.utils import SPOILER_LABELS, extract_primary_tag
 
 logger = setup_logger("visualization_suite")
 
@@ -84,16 +84,15 @@ class EvaluationReportBuilder:
     def _plot_confusion_matrix(self, y_true: list, y_pred: list):
         """Generates and saves the classification confusion matrix."""
         plt.figure(figsize=(6, 5))
-        labels = ["phrase", "passage", "multi"]
-        cm = confusion_matrix(y_true, y_pred, labels=labels)
+        cm = confusion_matrix(y_true, y_pred, labels=SPOILER_LABELS)
 
         sns.heatmap(
             cm,
             annot=True,
             fmt="d",
             cmap="Blues",
-            xticklabels=labels,
-            yticklabels=labels,
+            xticklabels=SPOILER_LABELS,
+            yticklabels=SPOILER_LABELS,
         )
         plt.title("Task 1: Confusion Matrix Heatmap")
         plt.ylabel("Ground Truth Label")
