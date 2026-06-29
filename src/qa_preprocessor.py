@@ -259,13 +259,15 @@ class QAPreprocessor:
         """
         import json
 
-        # If output path is a directory, append default filename
-        if os.path.isdir(path):
+        # Robustly handle directory creation even if the folder does not exist yet
+        if not path.endswith(".json"):
+            os.makedirs(path, exist_ok=True)
             export_file = os.path.join(path, "label_quality_stats.json")
         else:
+            parent_dir = os.path.dirname(path)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
             export_file = path
-
-        os.makedirs(os.path.dirname(export_file), exist_ok=True)
 
         stats = {
             "total_processed": self.total_processed,
