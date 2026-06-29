@@ -15,7 +15,7 @@ from transformers import (
 
 from src.utils import extract_primary_tag
 
-# Fix 1: Enforce global reproducibility from the start
+# Enforce global reproducibility across all initializations
 set_seed(42)
 
 
@@ -39,7 +39,10 @@ class ClickbaitWeightedTrainer(Trainer):
         outputs = model(**inputs)
         logits = outputs.get("logits")
 
-        loss_fct = nn.CrossEntropyLoss(weight=self.class_weights)
+        # Dynamically cast the class weights to match the logits type (Float vs Half) to prevent crashes
+        weights = self.class_weights.to(dtype=logits.dtype)
+
+        loss_fct = nn.CrossEntropyLoss(weight=weights)
         loss = loss_fct(logits.view(-1, self.model.config.num_labels), labels.view(-1))
 
         return (loss, outputs) if return_outputs else loss
@@ -143,7 +146,7 @@ class TransformerSpoilerClassifier:
             save_strategy="epoch",
             load_best_model_at_end=True,
             metric_for_best_model="f1",
-            logging_steps=10,  # Fix 5: Fine-grained tracking to observe early divergence
+            logging_steps=10,  # Fine-grained tracking to observe early divergence
             fp16=False,  # Safely disabled to prevent unscaling defects
             gradient_accumulation_steps=2,
             warmup_ratio=0.1,
