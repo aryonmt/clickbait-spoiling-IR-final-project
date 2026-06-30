@@ -25,14 +25,14 @@ logger = setup_logger("integrated_pipeline")
 
 class ClickbaitIntegratedPipeline:
     """Orchestrates combined inference using sequential Task 1 sequence classification
-
-    and Task 2 token span extraction.
+    and Task 2 token span extraction across separate Phrase/Passage models.
     """
 
-    def __init__(self, task1_dir: str, task2_dir: str, config: PipelineConfig):
+    def __init__(
+        self, task1_dir: str, phrase_dir: str, passage_dir: str, config: PipelineConfig
+    ):
         logger.info("Initializing Clickbait Spoiler Integrated Pipeline...")
         self.config = config
-        self.max_length = config.task2_max_length
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Load Task 1 Model
@@ -43,12 +43,19 @@ class ClickbaitIntegratedPipeline:
         self.t1_model.eval()
         self.t1_id_to_label = {0: "phrase", 1: "passage", 2: "multi"}
 
-        # Load Task 2 QA Model
-        logger.info(f"Loading Task 2 extractive QA weights from: {task2_dir}")
-        self.t2_tokenizer = AutoTokenizer.from_pretrained(task2_dir)
-        self.t2_model = AutoModelForQuestionAnswering.from_pretrained(task2_dir)
-        self.t2_model.to(self.device)
-        self.t2_model.eval()
+        # Load Phrase QA Model
+        logger.info(f"Loading Phrase QA weights from: {phrase_dir}")
+        self.phrase_tokenizer = AutoTokenizer.from_pretrained(phrase_dir)
+        self.phrase_model = AutoModelForQuestionAnswering.from_pretrained(phrase_dir)
+        self.phrase_model.to(self.device)
+        self.phrase_model.eval()
+
+        # Load Passage QA Model
+        logger.info(f"Loading Passage QA weights from: {passage_dir}")
+        self.passage_tokenizer = AutoTokenizer.from_pretrained(passage_dir)
+        self.passage_model = AutoModelForQuestionAnswering.from_pretrained(passage_dir)
+        self.passage_model.to(self.device)
+        self.passage_model.eval()
 
     def run_inference(self, df: pd.DataFrame):
         """Executes the complete integrated evaluation flow across the input dataframe.
@@ -72,7 +79,10 @@ class ClickbaitIntegratedPipeline:
         t1_ds = Dataset.from_pandas(processed_t1)
         t1_tokenized = t1_ds.map(
             lambda x: self.t1_tokenizer(
-                x["post"], x["article"], truncation=True, max_length=self.max_length
+                x["post"],
+                x["article"],
+                truncation=True,
+                max_length=self.config.task1_max_length,
             ),
             batched=True,
         )
@@ -115,7 +125,16 @@ class ClickbaitIntegratedPipeline:
                     method=self.config.task2_multi_method,
                 )
             else:
-                # Route 'phrase' and 'passage' classes to Transformer QA Extractor using n-best sliding window
+                # Select correct model and parameters depending on predicted tag
+                if pred_tag == "phrase":
+                    tokenizer = self.phrase_tokenizer
+                    model = self.phrase_model
+                    max_ans_len = self.config.task2_phrase_max_answer_length
+                else:  # passage
+                    tokenizer = self.passage_tokenizer
+                    model = self.passage_model
+                    max_ans_len = self.config.task2_passage_max_answer_length
+
                 paragraphs = row["targetParagraphs"]
                 context_str = (
                     " ".join(paragraphs)
@@ -128,15 +147,12 @@ class ClickbaitIntegratedPipeline:
                     else str(row["postText"])
                 )
 
-                # Fetch max answer limits dynamically based on expected type class (phrase vs passage)
-                max_ans_len = 10 if pred_tag == "phrase" else 150
-
                 span_result = predict_best_span(
-                    model=self.t2_model,
-                    tokenizer=self.t2_tokenizer,
+                    model=model,
+                    tokenizer=tokenizer,
                     question=post_str,
                     context=context_str,
-                    max_length=self.max_length,
+                    max_length=self.config.task2_max_length,
                     doc_stride=self.config.task2_doc_stride,
                     max_answer_length=max_ans_len,
                     device=self.device,
@@ -168,10 +184,16 @@ def main():
         help="Path to Task 1 classifier weights",
     )
     parser.add_argument(
-        "--t2_checkpoint",
+        "--phrase_checkpoint",
         type=str,
         required=True,
-        help="Path to Task 2 QA extractor weights",
+        help="Path to Phrase QA weights",
+    )
+    parser.add_argument(
+        "--passage_checkpoint",
+        type=str,
+        required=True,
+        help="Path to Passage QA weights",
     )
     parser.add_argument(
         "--output_path", type=str, default="final_integrated_submission.jsonl"
@@ -185,7 +207,10 @@ def main():
     config = PipelineConfig()
 
     pipeline = ClickbaitIntegratedPipeline(
-        task1_dir=args.t1_checkpoint, task2_dir=args.t2_checkpoint, config=config
+        task1_dir=args.t1_checkpoint,
+        phrase_dir=args.phrase_checkpoint,
+        passage_dir=args.passage_checkpoint,
+        config=config,
     )
 
     pred_tags, pred_spoilers, confidence_scores = pipeline.run_inference(val_df)

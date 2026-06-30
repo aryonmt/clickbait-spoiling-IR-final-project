@@ -30,6 +30,16 @@ class PipelineConfig:
     task2_epochs: int = 3
     task2_weight_decay: float = 0.01
 
+    # Task 2 - Phrase Extraction Config
+    task2_phrase_model_name: str = "deepset/roberta-base-squad2"
+    task2_phrase_max_answer_length: int = 10
+    task2_phrase_output_dir: str = "results_qa_phrase"
+
+    # Task 2 - Passage Extraction Config
+    task2_passage_model_name: str = "deepset/roberta-base-squad2"
+    task2_passage_max_answer_length: int = 150
+    task2_passage_output_dir: str = "results_qa_passage"
+
     # Multi-generator parameters (Phase 4)
     task2_multi_method: str = (
         "jaccard"  # Set strictly to 'jaccard' based on A/B/C test results
@@ -40,6 +50,8 @@ class PipelineConfig:
         """Create necessary output and logging directories."""
         os.makedirs(self.output_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)
+        os.makedirs(self.task2_phrase_output_dir, exist_ok=True)
+        os.makedirs(self.task2_passage_output_dir, exist_ok=True)
 
 
 def override_config_from_args(
