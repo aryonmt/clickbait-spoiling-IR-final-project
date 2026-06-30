@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 
 import numpy as np
 import pandas as pd
@@ -16,6 +17,7 @@ from src.config import PipelineConfig
 from src.data_loader import JSONLLoader
 from src.evaluation import AdvancedEvaluationSuite
 from src.logging_setup import setup_logger
+from src.postprocessor import detect_enumeration_spoiler, enforce_length_constraints
 from src.qa_inference import predict_best_span
 from src.retrieval_generator import RetrievalSpoilerGenerator
 from src.utils import extract_primary_tag
@@ -152,50 +154,59 @@ class ClickbaitIntegratedPipeline:
                     else str(paragraphs)
                 )
 
-                # Process dynamically based on multi strategy
-                if self.multi_strategy == "seq2seq" and self.multi_model:
-                    inputs = self.multi_tokenizer(
-                        f"question: {post_text} context: {context_str}",
-                        max_length=512,
-                        truncation=True,
-                        return_tensors="pt",
-                    ).to(self.device)
-                    with torch.no_grad():
-                        outputs = self.multi_model.generate(**inputs, max_length=128)
-                    generated_text = self.multi_tokenizer.decode(
-                        outputs[0], skip_special_tokens=True
-                    ).strip()
-                    # Splitting segment back based on fixed delimiter " | "
-                    spoiler = [
-                        s.strip() for s in generated_text.split("|") if s.strip()
-                    ]
-                    if not spoiler:
-                        spoiler = [paragraphs[0]] if paragraphs else []
-                elif self.multi_strategy == "extractive_iterative":
-                    from src.multi_spoiler_extractor import (
-                        generate_iterative_multi_spoiler,
-                    )
+                # Rule 3: Detect expected list counts dynamically from clickbait headlines
+                number_match = re.search(r"\b\d+\b", post_text)
+                n_expected = int(number_match.group(0)) if number_match else None
 
-                    spoiler = generate_iterative_multi_spoiler(
-                        model=self.multi_model,
-                        tokenizer=self.multi_tokenizer,
-                        question=post_text,
-                        context=context_str,
-                        max_length=self.config.task2_max_length,
-                        doc_stride=self.config.task2_doc_stride,
-                        max_answer_length=30,  # Smaller answer length for sub-segments
-                        device=self.device,
-                    )
-                    if not spoiler:
-                        spoiler = [paragraphs[0]] if paragraphs else []
+                # Apply enumeration spoiler detection first
+                enum_spoilers = detect_enumeration_spoiler(context_str, n_expected)
+                if enum_spoilers:
+                    spoiler = enum_spoilers
                 else:
-                    # Fallback to Jaccard or TF-IDF Lexical retrieval
-                    spoiler = RetrievalSpoilerGenerator.generate_multi_spoiler(
-                        post_text=post_text,
-                        paragraphs=paragraphs,
-                        top_k=self.config.task2_multi_top_k,
-                        method=self.config.task2_multi_method,
-                    )
+                    # Proceed with model-based generators (Seq2Seq, Iterative or Retrieval)
+                    if self.multi_strategy == "seq2seq" and self.multi_model:
+                        inputs = self.multi_tokenizer(
+                            f"question: {post_text} context: {context_str}",
+                            max_length=512,
+                            truncation=True,
+                            return_tensors="pt",
+                        ).to(self.device)
+                        with torch.no_grad():
+                            outputs = self.multi_model.generate(
+                                **inputs, max_length=128
+                            )
+                        generated_text = self.multi_tokenizer.decode(
+                            outputs[0], skip_special_tokens=True
+                        ).strip()
+                        spoiler = [
+                            s.strip() for s in generated_text.split("|") if s.strip()
+                        ]
+                        if not spoiler:
+                            spoiler = [paragraphs[0]] if paragraphs else []
+                    elif self.multi_strategy == "extractive_iterative":
+                        from src.multi_spoiler_extractor import (
+                            generate_iterative_multi_spoiler,
+                        )
+
+                        spoiler = generate_iterative_multi_spoiler(
+                            model=self.multi_model,
+                            tokenizer=self.multi_tokenizer,
+                            question=post_text,
+                            context=context_str,
+                            max_length=self.config.task2_max_length,
+                            doc_stride=self.config.task2_doc_stride,
+                            max_answer_length=30,
+                            device=self.device,
+                        )
+                        if not spoiler:
+                            spoiler = [paragraphs[0]] if paragraphs else []
+                    else:
+                        spoiler = RetrievalSpoilerGenerator.generate_multi_spoiler(
+                            post_text=post_text,
+                            paragraphs=paragraphs,
+                            top_k=self.config.task2_multi_top_k,
+                            method=self.config.task2_multi_method,
+                        )
             else:
                 # Select correct model and parameters depending on predicted tag
                 if pred_tag == "phrase":
@@ -230,6 +241,9 @@ class ClickbaitIntegratedPipeline:
                     device=self.device,
                 )
                 pred_text = span_result["text"]
+
+                # Apply rule-based length constraints (Phase 4)
+                pred_text = enforce_length_constraints(pred_text, pred_tag, context_str)
 
                 # Safe fallback to the first paragraph if the QA extraction returns empty
                 if not pred_text and len(row["targetParagraphs"]) > 0:
