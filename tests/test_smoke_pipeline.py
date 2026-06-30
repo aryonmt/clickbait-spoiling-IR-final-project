@@ -24,3 +24,14 @@ def test_smoke_task1_training(tmpdir):
 
     classifier = TransformerSpoilerClassifier(config=config)
     classifier.train_pipeline(train_df=train_df, val_df=val_df)
+
+
+def test_regression_baseline_snapshot():
+    """Regression snapshot test to ensure baseline validation files run safely."""
+    val_path = os.path.join("tests", "fixtures", "tiny_val.jsonl")
+    loader = JSONLLoader(val_path)
+    df = loader.load_data()
+
+    assert len(df) > 0
+    assert "uuid" in df.columns
+    assert "targetParagraphs" in df.columns
