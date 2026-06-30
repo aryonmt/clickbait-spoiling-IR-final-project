@@ -1,4 +1,5 @@
 import argparse
+import os
 
 from datasets import Dataset
 from transformers import (
@@ -68,13 +69,14 @@ def main():
         eval_strategy="epoch",
         save_strategy="epoch",
         learning_rate=args.lr,
-        per_device_train_batch_size=4,  # Safe T4 batch constraints to avoid OOM
+        per_device_train_batch_size=4,
         per_device_eval_batch_size=4,
         num_train_epochs=args.epochs,
         weight_decay=0.01,
         logging_steps=10,
         load_best_model_at_end=True,
         predict_with_generate=True,
+        save_total_limit=1,  # Keep only the single best checkpoint to save disk space
         fp16=True,
         report_to="none",
     )
@@ -95,6 +97,15 @@ def main():
 
     print(f"Saving optimized Seq2Seq model weights to {args.output_dir}...")
     trainer.save_model(args.output_dir)
+
+    # Clean intermediate checkpoint folders
+    import glob
+    import shutil
+
+    for folder in glob.glob(os.path.join(args.output_dir, "checkpoint-*")):
+        shutil.rmtree(folder, ignore_errors=True)
+        print(f"[CLEANUP] Pruned intermediate checkpoint: {folder}")
+
     print("[SUCCESS] Training execution routine complete.")
 
 

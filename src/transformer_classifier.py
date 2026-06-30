@@ -1,3 +1,4 @@
+import os
 import evaluate
 import numpy as np
 import pandas as pd
@@ -103,7 +104,8 @@ class TransformerSpoilerClassifier:
 
     def train_pipeline(self, train_df: pd.DataFrame, val_df: pd.DataFrame):
         """Executes full tokenization, model initialization, and full-precision
-        weighted training loop.
+
+        weighted training loop with aggressive checkpoint self-cleaning.
         """
         output_dir = self.config.output_dir
         print(f"Mapping and processing partitions for: {self.model_name}")
@@ -118,7 +120,7 @@ class TransformerSpoilerClassifier:
             num_labels=3,
             id2label=self.id_to_label,
             label2id=self.label_to_id,
-            ignore_mismatched_sizes=self.config.task1_ignore_mismatched_sizes,  # Mismatches strictly managed via configuration
+            ignore_mismatched_sizes=self.config.task1_ignore_mismatched_sizes,
         )
 
         def compute_metrics(eval_pred):
@@ -134,12 +136,13 @@ class TransformerSpoilerClassifier:
             learning_rate=self.lr,
             per_device_train_batch_size=self.config.task1_batch_size,
             per_device_eval_batch_size=self.config.task1_batch_size,
-            num_train_epochs=self.config.task1_epochs,  # Read epochs directly from config
+            num_train_epochs=self.config.task1_epochs,
             weight_decay=self.config.task1_weight_decay,
             eval_strategy="epoch",
             save_strategy="epoch",
             load_best_model_at_end=True,
             metric_for_best_model="f1",
+            save_total_limit=1,  # Prune old checkpoints automatically to save space
             logging_steps=10,
             fp16=False,
             gradient_accumulation_steps=2,
@@ -167,8 +170,19 @@ class TransformerSpoilerClassifier:
         eval_metrics = trainer.evaluate()
         print(eval_metrics)
 
-        # Phase 1.2: Explicitly save model to root output directory at completion
         print(f"Saving optimized Task 1 classifier weights to {output_dir}...")
         trainer.save_model(output_dir)
+
+        # Force clean up intermediate checkpoint subfolders to prevent disk space exhaustion
+        import glob
+        import shutil
+
+        checkpoint_dirs = glob.glob(os.path.join(output_dir, "checkpoint-*"))
+        for folder in checkpoint_dirs:
+            try:
+                shutil.rmtree(folder)
+                print(f"Removed intermediate checkpoint folder: {folder}")
+            except Exception as e:
+                print(f"Error removing checkpoint folder {folder}: {e}")
 
         return eval_metrics

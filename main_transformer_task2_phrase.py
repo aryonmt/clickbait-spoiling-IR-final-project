@@ -1,4 +1,5 @@
 import argparse
+import os
 
 import numpy as np
 from datasets import Dataset
@@ -135,19 +136,21 @@ def main():
         config.task2_phrase_model_name
     )
 
+    # Phase 2.4: Configure training arguments with strict save_total_limit
     training_args = TrainingArguments(
-        output_dir=config.task2_phrase_output_dir,
+        output_dir=config.task2_passage_output_dir,
         eval_strategy="epoch",
         save_strategy="epoch",
         learning_rate=config.task2_lr,
         per_device_train_batch_size=config.task2_batch_size,
         per_device_eval_batch_size=config.task2_batch_size,
-        num_train_epochs=config.task2_epochs,
+        num_train_epochs=config.task2_passage_epochs,
         weight_decay=0.01,
         logging_steps=10,
         load_best_model_at_end=True,
         metric_for_best_model="answerable_token_f1",
         greater_is_better=True,
+        save_total_limit=1,  # Keep only the single best checkpoint to save disk space
         fp16=True,
         report_to="none",
     )
@@ -162,13 +165,24 @@ def main():
         compute_metrics=compute_qa_metrics,
     )
 
-    print("\n=== LAUNCHING EXTRACTIVE TRANSFORMER PHRASE QA TRAIN SEQUENCE ===")
+    print("\n=== LAUNCHING EXTRACTIVE TRANSFORMER PASSAGE QA TRAIN SEQUENCE ===")
     trainer.train()
 
     print(
-        f"Saving optimized Phrase QA model weights to {config.task2_phrase_output_dir}..."
+        f"Saving optimized Passage QA model weights to {config.task2_passage_output_dir}..."
     )
-    trainer.save_model(config.task2_phrase_output_dir)
+    trainer.save_model(config.task2_passage_output_dir)
+
+    # Clean intermediate checkpoint folders
+    import glob
+    import shutil
+
+    for folder in glob.glob(
+        os.path.join(config.task2_passage_output_dir, "checkpoint-*")
+    ):
+        shutil.rmtree(folder, ignore_errors=True)
+        print(f"[CLEANUP] Pruned intermediate checkpoint: {folder}")
+
     print("[SUCCESS] Training execution routine complete.")
 
 

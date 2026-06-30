@@ -171,8 +171,8 @@ class QAPreprocessor:
                 self.fallback_count += 1
                 self.tag_fallbacks[tag] = self.tag_fallbacks.get(tag, 0) + 1
 
-                # Downgraded from warning to info to keep logs clean during sliding window splits
-                self.logger.info(
+                # Downgraded to debug to keep stdout clean during processing
+                self.logger.debug(
                     f"Spoiler text not found in context window for uuid: {uuids[sample_index]}. "
                     f"Falling back to CLS index. Tag: {tag}"
                 )
@@ -208,8 +208,8 @@ class QAPreprocessor:
                     self.fallback_count += 1
                     self.tag_fallbacks[tag] = self.tag_fallbacks.get(tag, 0) + 1
 
-                    # Downgraded from warning to info to keep logs clean during sliding window splits
-                    self.logger.info(
+                    # Downgraded to debug to keep stdout clean during processing
+                    self.logger.debug(
                         f"Answer span outside active token window for uuid: {uuids[sample_index]}. "
                         f"Falling back to CLS index. Tag: {tag}"
                     )
