@@ -1,4 +1,5 @@
 import argparse
+import os
 
 import numpy as np
 import pandas as pd
@@ -57,6 +58,34 @@ class ClickbaitIntegratedPipeline:
         self.passage_model.to(self.device)
         self.passage_model.eval()
 
+        # Configure dynamic multi spoilers strategy
+        self.multi_strategy = config.task2_multi_strategy
+        self.multi_model = None
+        self.multi_tokenizer = None
+
+        if self.multi_strategy == "extractive_iterative":
+            # Reuse the high quality passage extraction model for iterative QA suppression
+            logger.info(
+                "Iterative extraction selected. Binding multi model to passage weights."
+            )
+            self.multi_model = self.passage_model
+            self.multi_tokenizer = self.passage_tokenizer
+        elif self.multi_strategy == "seq2seq":
+            multi_dir = "results_multi_seq2seq"
+            if os.path.exists(multi_dir):
+                logger.info(f"Loading Seq2Seq model weights from: {multi_dir}")
+                from transformers import AutoModelForSeq2SeqLM
+
+                self.multi_tokenizer = AutoTokenizer.from_pretrained(multi_dir)
+                self.multi_model = AutoModelForSeq2SeqLM.from_pretrained(multi_dir)
+                self.multi_model.to(self.device)
+                self.multi_model.eval()
+            else:
+                logger.warning(
+                    f"Seq2Seq weights not found at {multi_dir}. Reverting to TF-IDF."
+                )
+                self.multi_strategy = "tfidf"
+
     def run_inference(self, df: pd.DataFrame):
         """Executes the complete integrated evaluation flow across the input dataframe.
 
@@ -111,19 +140,62 @@ class ClickbaitIntegratedPipeline:
             pred_tag = predicted_tags[idx]
 
             if pred_tag == "multi":
-                # Route 'multi' classes to custom lexically ranked Retrieval Spoiler Generator
                 post_text = (
                     " ".join(row["postText"])
                     if isinstance(row["postText"], list)
                     else str(row["postText"])
                 )
                 paragraphs = row["targetParagraphs"]
-                spoiler = RetrievalSpoilerGenerator.generate_multi_spoiler(
-                    post_text=post_text,
-                    paragraphs=paragraphs,
-                    top_k=self.config.task2_multi_top_k,
-                    method=self.config.task2_multi_method,
+                context_str = (
+                    " ".join(paragraphs)
+                    if isinstance(paragraphs, list)
+                    else str(paragraphs)
                 )
+
+                # Process dynamically based on multi strategy
+                if self.multi_strategy == "seq2seq" and self.multi_model:
+                    inputs = self.multi_tokenizer(
+                        f"question: {post_text} context: {context_str}",
+                        max_length=512,
+                        truncation=True,
+                        return_tensors="pt",
+                    ).to(self.device)
+                    with torch.no_grad():
+                        outputs = self.multi_model.generate(**inputs, max_length=128)
+                    generated_text = self.multi_tokenizer.decode(
+                        outputs[0], skip_special_tokens=True
+                    ).strip()
+                    # Splitting segment back based on fixed delimiter " | "
+                    spoiler = [
+                        s.strip() for s in generated_text.split("|") if s.strip()
+                    ]
+                    if not spoiler:
+                        spoiler = [paragraphs[0]] if paragraphs else []
+                elif self.multi_strategy == "extractive_iterative":
+                    from src.multi_spoiler_extractor import (
+                        generate_iterative_multi_spoiler,
+                    )
+
+                    spoiler = generate_iterative_multi_spoiler(
+                        model=self.multi_model,
+                        tokenizer=self.multi_tokenizer,
+                        question=post_text,
+                        context=context_str,
+                        max_length=self.config.task2_max_length,
+                        doc_stride=self.config.task2_doc_stride,
+                        max_answer_length=30,  # Smaller answer length for sub-segments
+                        device=self.device,
+                    )
+                    if not spoiler:
+                        spoiler = [paragraphs[0]] if paragraphs else []
+                else:
+                    # Fallback to Jaccard or TF-IDF Lexical retrieval
+                    spoiler = RetrievalSpoilerGenerator.generate_multi_spoiler(
+                        post_text=post_text,
+                        paragraphs=paragraphs,
+                        top_k=self.config.task2_multi_top_k,
+                        method=self.config.task2_multi_method,
+                    )
             else:
                 # Select correct model and parameters depending on predicted tag
                 if pred_tag == "phrase":

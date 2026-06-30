@@ -45,6 +45,9 @@ class PipelineConfig:
         "jaccard"  # Set strictly to 'jaccard' based on A/B/C test results
     )
     task2_multi_top_k: int = 3  # Set to 3 as it yielded the highest ROUGE-L overlap
+    task2_multi_strategy: str = (
+        "tfidf"  # Can be 'jaccard', 'tfidf', 'extractive_iterative', or 'seq2seq'
+    )
 
     def __post_init__(self) -> None:
         """Create necessary output and logging directories."""
