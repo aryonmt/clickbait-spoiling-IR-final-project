@@ -1,6 +1,5 @@
 import argparse
 import os
-import re
 
 import numpy as np
 import pandas as pd
@@ -8,16 +7,16 @@ import torch
 from datasets import Dataset
 from transformers import (
     AutoModelForQuestionAnswering,
+    AutoModelForSeq2SeqLM,  # Promoted to module level to support robust unittest mocking
     AutoModelForSequenceClassification,
     AutoTokenizer,
     Trainer,
 )
 
-from src.config import PipelineConfig
+from src.config import PipelineConfig, override_config_from_args
 from src.data_loader import JSONLLoader
 from src.evaluation import AdvancedEvaluationSuite
 from src.logging_setup import setup_logger
-from src.postprocessor import detect_enumeration_spoiler, enforce_length_constraints
 from src.qa_inference import predict_best_span
 from src.retrieval_generator import RetrievalSpoilerGenerator
 from src.utils import extract_primary_tag
@@ -26,9 +25,100 @@ from src.utils import extract_primary_tag
 logger = setup_logger("integrated_pipeline")
 
 
+def extract_qa_span(
+    tokenizer: AutoTokenizer,
+    model: AutoModelForQuestionAnswering,
+    question_list: list,
+    paragraphs_list: list,
+    max_length: int,
+    device: torch.device,
+) -> str:
+    """Extracts a precise spoiler span from target context ensuring boundary safety
+
+    and restricting selection exclusively to context token indices.
+
+    Args:
+        tokenizer: Tokenizer for formatting the QA text pairs.
+        model: Question answering model checkpoint.
+        question_list: Sequential list containing clickbait post words.
+        paragraphs_list: Sequential paragraphs from the source article.
+        max_length: Upper-bound sequence constraints.
+        device: Active computing target (cuda or cpu).
+
+    Returns:
+        str: Decoded span sequence extracted safely from the context.
+    """
+    question = (
+        " ".join(question_list)
+        if isinstance(question_list, list)
+        else str(question_list)
+    )
+    context = (
+        " ".join(paragraphs_list)
+        if isinstance(paragraphs_list, list)
+        else str(paragraphs_list)
+    )
+
+    encoding = tokenizer(
+        question,
+        context,
+        truncation="only_second",
+        max_length=max_length,
+        return_tensors="pt",
+    )
+
+    # Get sequence IDs: 0 for question, 1 for context, None for special tokens
+    sequence_ids = encoding.sequence_ids(0)
+    inputs = {k: v.to(device) for k, v in encoding.items()}
+
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    start_logits = outputs.start_logits[0].cpu().numpy()
+    end_logits = outputs.end_logits[0].cpu().numpy()
+
+    # Identify token boundaries belonging exclusively to the article context
+    context_token_indices = [idx for idx, s_id in enumerate(sequence_ids) if s_id == 1]
+    if not context_token_indices:
+        return ""
+
+    context_start = context_token_indices[0]
+    context_end = context_token_indices[-1]
+
+    # Mask logits outside of the safe context sequence limits
+    masked_start_logits = np.full_like(start_logits, -10000.0)
+    masked_end_logits = np.full_like(end_logits, -10000.0)
+
+    masked_start_logits[context_start : context_end + 1] = start_logits[
+        context_start : context_end + 1
+    ]
+    masked_end_logits[context_start : context_end + 1] = end_logits[
+        context_start : context_end + 1
+    ]
+
+    # Find the optimal valid span such that end >= start and length <= 150
+    best_score = -float("inf")
+    best_start = context_start
+    best_end = context_start
+
+    for s in range(context_start, context_end + 1):
+        for e in range(s, min(s + 150, context_end + 1)):
+            score = masked_start_logits[s] + masked_end_logits[e]
+            if score > best_score:
+                best_score = score
+                best_start = s
+                best_end = e
+
+    input_ids = encoding["input_ids"][0].cpu().numpy()
+    extracted_tokens = input_ids[best_start : best_end + 1]
+
+    decoded_span = tokenizer.decode(extracted_tokens, skip_special_tokens=True).strip()
+    return decoded_span
+
+
 class ClickbaitIntegratedPipeline:
     """Orchestrates combined inference using sequential Task 1 sequence classification
-    and Task 2 token span extraction across separate Phrase/Passage models.
+    and Task 2 token span extraction across separate Phrase/Passage/Multi models.
     """
 
     def __init__(
@@ -60,31 +150,28 @@ class ClickbaitIntegratedPipeline:
         self.passage_model.to(self.device)
         self.passage_model.eval()
 
-        # Configure dynamic multi spoilers strategy
+        # Configure dynamic multi spoilers strategy (Phase 3 & 4)
         self.multi_strategy = config.task2_multi_strategy
         self.multi_model = None
         self.multi_tokenizer = None
 
         if self.multi_strategy == "extractive_iterative":
-            # Reuse the high quality passage extraction model for iterative QA suppression
             logger.info(
                 "Iterative extraction selected. Binding multi model to passage weights."
             )
             self.multi_model = self.passage_model
             self.multi_tokenizer = self.passage_tokenizer
         elif self.multi_strategy == "seq2seq":
-            multi_dir = "results_multi_seq2seq"
+            multi_dir = config.task2_multi_seq2seq_dir
             if os.path.exists(multi_dir):
-                logger.info(f"Loading Seq2Seq model weights from: {multi_dir}")
-                from transformers import AutoModelForSeq2SeqLM
-
+                logger.info(f"Loading Seq2Seq T5 weights from: {multi_dir}")
                 self.multi_tokenizer = AutoTokenizer.from_pretrained(multi_dir)
                 self.multi_model = AutoModelForSeq2SeqLM.from_pretrained(multi_dir)
                 self.multi_model.to(self.device)
                 self.multi_model.eval()
             else:
                 logger.warning(
-                    f"Seq2Seq weights not found at {multi_dir}. Reverting to TF-IDF."
+                    f"Seq2Seq directory {multi_dir} not found. Falling back to TF-IDF."
                 )
                 self.multi_strategy = "tfidf"
 
@@ -154,59 +241,50 @@ class ClickbaitIntegratedPipeline:
                     else str(paragraphs)
                 )
 
-                # Rule 3: Detect expected list counts dynamically from clickbait headlines
-                number_match = re.search(r"\b\d+\b", post_text)
-                n_expected = int(number_match.group(0)) if number_match else None
+                # Process dynamically based on multi strategy (Phase 3 & 5)
+                if self.multi_strategy == "seq2seq" and self.multi_model:
+                    inputs = self.multi_tokenizer(
+                        f"question: {post_text} context: {context_str}",
+                        max_length=512,
+                        truncation=True,
+                        return_tensors="pt",
+                    ).to(self.device)
+                    with torch.no_grad():
+                        outputs = self.multi_model.generate(**inputs, max_length=128)
+                    generated_text = self.multi_tokenizer.decode(
+                        outputs[0], skip_special_tokens=True
+                    ).strip()
+                    # Splitting segment back based on fixed delimiter " | "
+                    spoiler = [
+                        s.strip() for s in generated_text.split("|") if s.strip()
+                    ]
+                    if not spoiler:
+                        spoiler = [paragraphs[0]] if paragraphs else []
+                elif self.multi_strategy == "extractive_iterative":
+                    from src.multi_spoiler_extractor import (
+                        generate_iterative_multi_spoiler,
+                    )
 
-                # Apply enumeration spoiler detection first
-                enum_spoilers = detect_enumeration_spoiler(context_str, n_expected)
-                if enum_spoilers:
-                    spoiler = enum_spoilers
+                    spoiler = generate_iterative_multi_spoiler(
+                        model=self.multi_model,
+                        tokenizer=self.multi_tokenizer,
+                        question=post_text,
+                        context=context_str,
+                        max_length=self.config.task2_max_length,
+                        doc_stride=self.config.task2_doc_stride,
+                        max_answer_length=30,  # Smaller answer length for sub-segments
+                        device=self.device,
+                    )
+                    if not spoiler:
+                        spoiler = [paragraphs[0]] if paragraphs else []
                 else:
-                    # Proceed with model-based generators (Seq2Seq, Iterative or Retrieval)
-                    if self.multi_strategy == "seq2seq" and self.multi_model:
-                        inputs = self.multi_tokenizer(
-                            f"question: {post_text} context: {context_str}",
-                            max_length=512,
-                            truncation=True,
-                            return_tensors="pt",
-                        ).to(self.device)
-                        with torch.no_grad():
-                            outputs = self.multi_model.generate(
-                                **inputs, max_length=128
-                            )
-                        generated_text = self.multi_tokenizer.decode(
-                            outputs[0], skip_special_tokens=True
-                        ).strip()
-                        spoiler = [
-                            s.strip() for s in generated_text.split("|") if s.strip()
-                        ]
-                        if not spoiler:
-                            spoiler = [paragraphs[0]] if paragraphs else []
-                    elif self.multi_strategy == "extractive_iterative":
-                        from src.multi_spoiler_extractor import (
-                            generate_iterative_multi_spoiler,
-                        )
-
-                        spoiler = generate_iterative_multi_spoiler(
-                            model=self.multi_model,
-                            tokenizer=self.multi_tokenizer,
-                            question=post_text,
-                            context=context_str,
-                            max_length=self.config.task2_max_length,
-                            doc_stride=self.config.task2_doc_stride,
-                            max_answer_length=30,
-                            device=self.device,
-                        )
-                        if not spoiler:
-                            spoiler = [paragraphs[0]] if paragraphs else []
-                    else:
-                        spoiler = RetrievalSpoilerGenerator.generate_multi_spoiler(
-                            post_text=post_text,
-                            paragraphs=paragraphs,
-                            top_k=self.config.task2_multi_top_k,
-                            method=self.config.task2_multi_method,
-                        )
+                    # Fallback to Jaccard or TF-IDF Lexical retrieval
+                    spoiler = RetrievalSpoilerGenerator.generate_multi_spoiler(
+                        post_text=post_text,
+                        paragraphs=paragraphs,
+                        top_k=self.config.task2_multi_top_k,
+                        method=self.config.task2_multi_method,
+                    )
             else:
                 # Select correct model and parameters depending on predicted tag
                 if pred_tag == "phrase":
@@ -241,9 +319,6 @@ class ClickbaitIntegratedPipeline:
                     device=self.device,
                 )
                 pred_text = span_result["text"]
-
-                # Apply rule-based length constraints (Phase 4)
-                pred_text = enforce_length_constraints(pred_text, pred_tag, context_str)
 
                 # Safe fallback to the first paragraph if the QA extraction returns empty
                 if not pred_text and len(row["targetParagraphs"]) > 0:
@@ -282,6 +357,11 @@ def main():
         help="Path to Passage QA weights",
     )
     parser.add_argument(
+        "--multi_strategy",
+        type=str,
+        help="Strategy for multi-type spoilers (seq2seq, extractive_iterative, tfidf, jaccard)",
+    )
+    parser.add_argument(
         "--output_path", type=str, default="final_integrated_submission.jsonl"
     )
     args = parser.parse_args()
@@ -291,6 +371,7 @@ def main():
 
     # Initialize configuration with dynamically defined parameters
     config = PipelineConfig()
+    config = override_config_from_args(config, args)
 
     pipeline = ClickbaitIntegratedPipeline(
         task1_dir=args.t1_checkpoint,

@@ -40,13 +40,14 @@ class PipelineConfig:
     task2_passage_max_answer_length: int = 150
     task2_passage_output_dir: str = "results_qa_passage"
 
-    # Multi-generator parameters (Phase 4)
-    task2_multi_method: str = (
-        "jaccard"  # Set strictly to 'jaccard' based on A/B/C test results
-    )
-    task2_multi_top_k: int = 3  # Set to 3 as it yielded the highest ROUGE-L overlap
+    # Multi-generator parameters (Phase 3 & 4)
     task2_multi_strategy: str = (
-        "tfidf"  # Can be 'jaccard', 'tfidf', 'extractive_iterative', or 'seq2seq'
+        "seq2seq"  # Changed default strategy to seq2seq to automatically load T5 model
+    )
+    task2_multi_method: str = "jaccard"
+    task2_multi_top_k: int = 3
+    task2_multi_seq2seq_dir: str = (
+        "results_multi_seq2seq"  # Moved directory from hardcoded to config
     )
 
     def __post_init__(self) -> None:
@@ -70,6 +71,10 @@ def override_config_from_args(
         The updated PipelineConfig instance.
     """
     for key, value in vars(args).items():
-        if value is not None and hasattr(config, key):
-            setattr(config, key, value)
+        if value is not None:
+            # Map arg overrides dynamically to correct dataclass attributes
+            if key == "multi_strategy" and hasattr(config, "task2_multi_strategy"):
+                setattr(config, "task2_multi_strategy", value)
+            elif hasattr(config, key):
+                setattr(config, key, value)
     return config
