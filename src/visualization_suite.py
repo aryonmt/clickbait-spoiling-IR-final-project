@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
+from nltk.translate.meteor_score import meteor_score
 from rouge_score import rouge_scorer
 from sklearn.metrics import classification_report, confusion_matrix
 
@@ -42,12 +43,13 @@ class EvaluationReportBuilder:
         return merged_df
 
     def _compute_generation_metrics(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Computes BLEU and ROUGE-L scores per instance."""
+        """Computes BLEU, ROUGE-L, METEOR and semantic BERTScore per instance."""
         scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
         smoother = SmoothingFunction().method1
 
         bleus = []
         rouges = []
+        meteors = []
 
         for _, row in df.iterrows():
             gt = row["spoiler_true"]
@@ -67,14 +69,43 @@ class EvaluationReportBuilder:
             pred_tokens = pred_text.split()
             if not pred_tokens or not gt_tokens:
                 bleus.append(0.0)
+                meteors.append(0.0)
             else:
                 score = sentence_bleu(
                     [gt_tokens], pred_tokens, smoothing_function=smoother
                 )
                 bleus.append(score)
 
+                # Compute METEOR
+                m_score = meteor_score([gt_tokens], pred_tokens)
+                meteors.append(m_score)
+
         df["bleu"] = bleus
         df["rouge_l"] = rouges
+        df["meteor"] = meteors
+
+        # Calculate semantic BERTScore if available
+        bert_scores = [0.0] * len(df)
+        try:
+            import bert_score
+
+            references_str = [
+                " ".join(gt) if isinstance(gt, list) else str(gt)
+                for gt in df["spoiler_true"]
+            ]
+            candidates_str = [
+                " ".join(pred) if isinstance(pred, list) else str(pred)
+                for pred in df["spoiler_pred"]
+            ]
+            if references_str and candidates_str:
+                _, _, F1 = bert_score.score(
+                    candidates_str, references_str, lang="en", verbose=False
+                )
+                bert_scores = F1.numpy().tolist()
+        except ImportError:
+            pass
+
+        df["bert_score"] = bert_scores
         df["true_tag"] = df["tags"].apply(extract_primary_tag)
         df["pred_tag"] = df["spoilerType"]
 
@@ -285,7 +316,7 @@ class EvaluationReportBuilder:
         html_content = f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>Clickbait Spoiling System Evaluation — Version 2</title>
+    <title>Clickbait Spoiling System Evaluation — Version 5</title>
     <style>
         body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 40px; background-color: #f8f9fa; color: #333; }}
         h1, h2 {{ color: #2c3e50; border-bottom: 2px solid #ecf0f1; padding-bottom: 10px; }}
@@ -300,7 +331,7 @@ class EvaluationReportBuilder:
     </style>
 </head>
 <body>
-    <h1>Clickbait Spoiling Evaluation Report (V2 Pipeline)</h1>
+    <h1>Clickbait Spoiling Evaluation Report (V5 Overhaul)</h1>
     <p>Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
 
     <div class="card">
@@ -479,6 +510,8 @@ class EvaluationReportBuilder:
             "task1_macro_f1": macro_f1,
             "task2_mean_bleu": mean_bleu,
             "task2_mean_rouge_l": mean_rouge,
+            "task2_mean_meteor": float(df["meteor"].mean()),
+            "task2_mean_bert_score": float(df["bert_score"].mean()),
             "task2_cls_fallback_rate": fallback_rate,
             "task2_cls_fallback_label": fallback_label,
             "task1_by_type": {
@@ -494,6 +527,10 @@ class EvaluationReportBuilder:
                 tag: {
                     "mean_bleu": float(df[df["true_tag"] == tag]["bleu"].mean()),
                     "mean_rouge": float(df[df["true_tag"] == tag]["rouge_l"].mean()),
+                    "mean_meteor": float(df[df["true_tag"] == tag]["meteor"].mean()),
+                    "mean_bert_score": float(
+                        df[df["true_tag"] == tag]["bert_score"].mean()
+                    ),
                 }
                 for tag in SPOILER_LABELS
             },
@@ -504,6 +541,47 @@ class EvaluationReportBuilder:
             os.path.join(self.report_dir, "metrics_summary.json"), "w", encoding="utf-8"
         ) as f:
             json.dump(summary_metrics, f, indent=4)
+
+        # Export delta-comparison report against Phase 0 baseline (Phase 5.1)
+        baseline_metrics = {
+            "task1_accuracy": 0.73625,
+            "task1_macro_f1": 0.73082,
+            "task2_mean_bleu": 0.16818,
+            "task2_mean_rouge_l": 0.43362,
+        }
+
+        comparison = {
+            "metrics": {
+                "task1_accuracy": {
+                    "baseline": baseline_metrics["task1_accuracy"],
+                    "current": acc,
+                    "delta": acc - baseline_metrics["task1_accuracy"],
+                },
+                "task1_macro_f1": {
+                    "baseline": baseline_metrics["task1_macro_f1"],
+                    "current": macro_f1,
+                    "delta": macro_f1 - baseline_metrics["task1_macro_f1"],
+                },
+                "task2_mean_bleu": {
+                    "baseline": baseline_metrics["task2_mean_bleu"],
+                    "current": mean_bleu,
+                    "delta": mean_bleu - baseline_metrics["task2_mean_bleu"],
+                },
+                "task2_mean_rouge_l": {
+                    "baseline": baseline_metrics["task2_mean_rouge_l"],
+                    "current": mean_rouge,
+                    "delta": mean_rouge - baseline_metrics["task2_mean_rouge_l"],
+                },
+            }
+        }
+
+        with open(
+            os.path.join(self.report_dir, "comparison_to_baseline.json"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump(comparison, f, indent=4)
+        logger.info(f"Comparison report exported successfully to: {self.report_dir}")
 
         # Get 5 worst performing predictions for error analysis
         worst_df = df.sort_values(by="bleu").head(5)
